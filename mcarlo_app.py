@@ -27,7 +27,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("📈 Monte Carlo Stock Price Simulator")
+st.title("📈 Price Action Forecast via Monte Carlo Simulation")
 st.markdown(
     "Fetches real historical data via **yfinance** and simulates future price "
     "paths using **Geometric Brownian Motion (GBM)**."
