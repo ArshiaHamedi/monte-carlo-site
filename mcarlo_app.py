@@ -1,9 +1,8 @@
 """
-Monte Carlo Stock Price Simulation — Streamlit App
+monte carlo stock price simulation - streamlit app
 ====================================================
-Converted from mcarlo.py (CLI) to a Streamlit web app.
-
-Run with:
+all data derived from yfinance and cached for performance 
+run with:
     streamlit run mcarlo_app.py
 """
 
@@ -23,7 +22,7 @@ from datetime import date, datetime, timedelta
 # ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Monte Carlo Stock Simulator",
+    page_title="Price Action Forecast via Monte Carlo Simulation",
     page_icon="📈",
     layout="wide",
 )
