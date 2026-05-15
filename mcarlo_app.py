@@ -466,7 +466,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
         st.subheader("🤖 AI Summary — Plain English Breakdown")
         st.markdown(
             "An AI-generated explanation of your simulation results, "
-            "written for everyday investors."
+            "written for everyday investors, powered by Groq."
         )
 
         groq_key = st.secrets.get("GROQ_API_KEY", "")
@@ -486,7 +486,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
             client = Groq(api_key=groq_key)
             with st.spinner("Generating AI summary…"):
                 stream = client.chat.completions.create(
-                    model="llama3-70b-8192",
+                    model="llama-3.3-70b-versatile",
                     messages=[
                         {
                             "role": "system",
@@ -495,7 +495,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                                 "You explain quantitative results in plain English for retail investors. "
                                 "You never make price predictions or give investment advice. "
                                 "You always remind users that simulations are based on historical data "
-                                "and are not guarantees of future performance."
+                                "and are not guarantees of future performance, nor are a financial advice."
                             ),
                         },
                         {"role": "user", "content": prompt},
