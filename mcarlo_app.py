@@ -10,6 +10,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import io
+import csv
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -20,6 +21,7 @@ import yfinance as yf
 import streamlit as st
 from datetime import date, datetime, timedelta
 from scipy.stats import t as student_t
+from groq import Groq
 
 # ── Page config ───────────────────────────────────────────────────────────────
 
@@ -32,7 +34,7 @@ st.set_page_config(
 # ── Preset definitions ────────────────────────────────────────────────────────
 
 PRESETS = {
-    "Custom": None,   # sentinel — means "don't overwrite sliders"
+    "Custom": None,
     "Conservative": {
         "vol_scale":    0.75,
         "ewma_lambda":  0.97,
@@ -70,6 +72,7 @@ PRESETS = {
 # ── Tab layout ────────────────────────────────────────────────────────────────
 
 tab_sim, tab_about = st.tabs(["📈 Simulator", "📖 About & Methodology"])
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — SIMULATOR
@@ -123,20 +126,17 @@ with tab_sim:
             min_value=100, max_value=10000, value=500, step=100,
         )
 
-        # ── Preset picker ─────────────────────────────────────────────────────
         st.subheader("Model preset")
         preset_name = st.selectbox(
             "Choose a preset",
             options=list(PRESETS.keys()),
-            index=1,   # default to "Conservative"
-            help="Presets auto-fill the Advanced sliders below. Switch to Custom to tweak freely.",
+            index=2,  # default: Balanced
+            help="Presets auto-fill the Advanced sliders. Switch to Custom to tweak freely.",
         )
-
         preset = PRESETS[preset_name]
         if preset:
             st.caption(f"ℹ️ {preset['description']}")
 
-        # ── Advanced sliders (pre-filled by preset if not Custom) ─────────────
         st.subheader("Advanced")
 
         def _val(key, default):
@@ -206,6 +206,7 @@ with tab_sim:
 
     @st.cache_data(show_spinner="Fetching historical data from yfinance…")
     def fetch_data(ticker: str, start: date, end: date):
+        """Cached: same ticker+range won't re-hit yfinance on every widget change."""
         end_inclusive = end + timedelta(days=1)
         df = yf.download(
             ticker,
@@ -243,11 +244,11 @@ with tab_sim:
 
     def compute_parameters(closes, drift_override=None, vol_scale=1.0,
                            ewma_lambda=0.94, drift_window=63):
-        log_returns    = np.log(closes / closes.shift(1)).dropna()
-        ann_drift_full = log_returns.mean() * 252
-        ann_vol_simple = log_returns.std()  * np.sqrt(252)
-        daily_ewma_vol = compute_ewma_vol(log_returns, ewma_lambda)
-        ann_vol_ewma   = daily_ewma_vol * np.sqrt(252)
+        log_returns      = np.log(closes / closes.shift(1)).dropna()
+        ann_drift_full   = log_returns.mean() * 252
+        ann_vol_simple   = log_returns.std()  * np.sqrt(252)
+        daily_ewma_vol   = compute_ewma_vol(log_returns, ewma_lambda)
+        ann_vol_ewma     = daily_ewma_vol * np.sqrt(252)
         recent_returns   = log_returns.iloc[-drift_window:] if len(log_returns) >= drift_window else log_returns
         daily_drift      = recent_returns.mean()
         ann_drift_recent = daily_drift * 252
@@ -270,9 +271,9 @@ with tab_sim:
 
     def run_simulation(params, days, n_sims, t_dof):
         mu, sigma, S0 = params["daily_mean"], params["daily_std"], params["last_price"]
-        raw          = student_t.rvs(df=t_dof, size=(n_sims, days))
-        scale_factor = np.sqrt(t_dof / (t_dof - 2))
-        Z            = raw / scale_factor
+        raw           = student_t.rvs(df=t_dof, size=(n_sims, days))
+        scale_factor  = np.sqrt(t_dof / (t_dof - 2))
+        Z             = raw / scale_factor
         daily_returns = (mu - 0.5 * sigma**2) + sigma * Z
         log_paths     = np.concatenate([np.zeros((n_sims, 1)), daily_returns], axis=1)
         return S0 * np.exp(np.cumsum(log_paths, axis=1))
@@ -293,28 +294,22 @@ with tab_sim:
     # ── VaR & CVaR ───────────────────────────────────────────────────────────
 
     def compute_risk_metrics(paths, S0, confidence_levels=(0.90, 0.95, 0.99)):
-        """
-        Compute VaR and CVaR (Expected Shortfall) from the simulated final
-        price distribution, expressed both in dollar terms and as a % of S0.
-        """
-        final_prices   = paths[:, -1]
-        pnl            = final_prices - S0          # profit / loss per share
-        pnl_pct        = (final_prices / S0 - 1) * 100
-
+        final_prices = paths[:, -1]
+        pnl          = final_prices - S0
+        pnl_pct      = (final_prices / S0 - 1) * 100
         rows = []
         for cl in confidence_levels:
-            alpha     = 1 - cl                       # e.g. 0.05 for 95% CL
+            alpha     = 1 - cl
             var_usd   = -np.percentile(pnl, alpha * 100)
             var_pct   = -np.percentile(pnl_pct, alpha * 100)
-            # CVaR = mean of losses beyond the VaR threshold
             tail_mask = pnl <= -var_usd
-            cvar_usd  = -pnl[tail_mask].mean() if tail_mask.any() else var_usd
+            cvar_usd  = -pnl[tail_mask].mean()     if tail_mask.any() else var_usd
             cvar_pct  = -pnl_pct[tail_mask].mean() if tail_mask.any() else var_pct
             rows.append({
-                "Confidence level": f"{int(cl*100)}%",
-                "VaR (USD)":        f"${var_usd:.2f}",
-                "VaR (% of S0)":    f"{var_pct:.1f}%",
-                "CVaR / ES (USD)":  f"${cvar_usd:.2f}",
+                "Confidence level":    f"{int(cl*100)}%",
+                "VaR (USD)":           f"${var_usd:.2f}",
+                "VaR (% of S0)":       f"{var_pct:.1f}%",
+                "CVaR / ES (USD)":     f"${cvar_usd:.2f}",
                 "CVaR / ES (% of S0)": f"{cvar_pct:.1f}%",
             })
         return pd.DataFrame(rows)
@@ -325,20 +320,17 @@ with tab_sim:
             f"Tail-risk estimates for **{ticker}** over **{days} trading days**, "
             "derived from the full simulated final-price distribution."
         )
-
         risk_df = compute_risk_metrics(paths, S0)
         st.dataframe(risk_df, use_container_width=True, hide_index=True)
 
         col1, col2 = st.columns(2)
         final   = paths[:, -1]
         pnl_pct = (final / S0 - 1) * 100
-
         with col1:
             var95  = -np.percentile((final - S0), 5)
             cvar95 = -(final - S0)[final - S0 <= -var95].mean()
-            st.metric("VaR 95%",        f"${var95:.2f}",  f"{-var95/S0*100:.1f}% of S0")
-            st.metric("CVaR 95% (ES)",  f"${cvar95:.2f}", f"{-cvar95/S0*100:.1f}% of S0")
-
+            st.metric("VaR 95%",       f"${var95:.2f}",  f"{-var95/S0*100:.1f}% of S0")
+            st.metric("CVaR 95% (ES)", f"${cvar95:.2f}", f"{-cvar95/S0*100:.1f}% of S0")
         with col2:
             prob_loss_10 = np.mean(pnl_pct < -10) * 100
             prob_loss_25 = np.mean(pnl_pct < -25) * 100
@@ -347,62 +339,250 @@ with tab_sim:
 
         with st.expander("What do these numbers mean?"):
             st.markdown("""
-**VaR (Value at Risk)** answers: *"What is the maximum loss I should expect to NOT exceed, X% of the time?"*
-
+**VaR (Value at Risk)** answers: *"What is the maximum loss I should expect NOT to exceed, X% of the time?"*
 - **VaR 95%** = there is a 5% chance of losing *more* than this amount over the forecast horizon.
 - **VaR 99%** = there is a 1% chance of losing more than this amount.
 
-**CVaR (Conditional VaR) / Expected Shortfall** answers: *"If I do end up in the worst tail, what is my average loss?"*
+**CVaR (Conditional VaR) / Expected Shortfall** answers: *"If I end up in the worst tail, what is my average loss?"*
+- CVaR is always ≥ VaR. It tells you the *severity* of bad outcomes, not just a threshold.
+- A stock with VaR 95% = $5 and CVaR 95% = $12 has a heavier tail than one where both values are close.
 
-- CVaR is always ≥ VaR. It is considered a superior risk measure because it tells you the *severity* of bad outcomes, not just a threshold.
-- A stock with VaR 95% = $5 and CVaR 95% = $12 has a heavier tail than one where both values are close together.
-
-> ⚠️ These figures are model-derived estimates based on historical price behaviour. They are not guarantees and should not be used as the sole basis for investment decisions.
+> ⚠️ These figures are model-derived estimates. They are not guarantees and should not be the sole basis for investment decisions.
             """)
+
+    # ── AI Summary ───────────────────────────────────────────────────────────
+
+    def build_ai_prompt(ticker, info, params, paths, pcts, days,
+                        n_sims, preset_name, ewma_lambda, t_dof, start, end):
+        """Assemble all simulation outputs into a structured prompt for Llama 3."""
+        final        = paths[:, -1]
+        S0           = params["last_price"]
+        p5           = float(np.percentile(final,  5))
+        p25          = float(np.percentile(final, 25))
+        p50          = float(np.percentile(final, 50))
+        p75          = float(np.percentile(final, 75))
+        p95          = float(np.percentile(final, 95))
+        prob_gain    = float(np.mean(final > S0) * 100)
+        worst        = float(np.min(final))
+        best         = float(np.max(final))
+        pnl_pct      = (final / S0 - 1) * 100
+        prob_loss10  = float(np.mean(pnl_pct < -10) * 100)
+        prob_loss25  = float(np.mean(pnl_pct < -25) * 100)
+        var95        = float(-np.percentile(final - S0, 5))
+        tail_mask    = (final - S0) <= -var95
+        cvar95       = float(-(final - S0)[tail_mask].mean()) if tail_mask.any() else var95
+
+        company_name = info.get("longName", ticker.upper())
+        sector       = info.get("sector",   "Unknown sector")
+        industry     = info.get("industry", "Unknown industry")
+
+        ann_vol = params["ann_vol_ewma"]
+        if ann_vol < 0.20:
+            vol_regime = "low (below 20% annualised — typical of large-cap defensives)"
+        elif ann_vol < 0.40:
+            vol_regime = "moderate (20–40% annualised — typical of most equities)"
+        elif ann_vol < 0.70:
+            vol_regime = "high (40–70% annualised — typical of growth or speculative names)"
+        else:
+            vol_regime = "very high (above 70% annualised — extremely speculative)"
+
+        drift = params["ann_drift_recent"]
+        if drift > 0.15:
+            drift_desc = f"strongly positive ({drift:+.1%} annualised) — the stock has had strong recent momentum"
+        elif drift > 0.02:
+            drift_desc = f"mildly positive ({drift:+.1%} annualised)"
+        elif drift > -0.02:
+            drift_desc = f"roughly flat ({drift:+.1%} annualised) — little directional trend recently"
+        elif drift > -0.15:
+            drift_desc = f"mildly negative ({drift:+.1%} annualised)"
+        else:
+            drift_desc = f"strongly negative ({drift:+.1%} annualised) — the stock has been under significant pressure"
+
+        spread_pct = (p95 - p5) / S0 * 100
+        if spread_pct < 30:
+            spread_desc = "tight — the range of outcomes is relatively narrow"
+        elif spread_pct < 80:
+            spread_desc = "moderate — a reasonable spread of outcomes"
+        else:
+            spread_desc = "very wide — outcomes are highly uncertain and span a large range"
+
+        trading_years = days / 252
+
+        prompt = f"""You are a financial analyst assistant helping everyday retail investors understand the results of a Monte Carlo stock price simulation. Your job is to explain what the numbers mean in plain English — no jargon, no math symbols. Write as if you are a knowledgeable friend explaining this to someone who has never traded before, but is curious and intelligent.
+
+Here are the simulation results for {company_name} ({ticker.upper()}):
+
+COMPANY INFO:
+- Sector: {sector}
+- Industry: {industry}
+
+SIMULATION SETTINGS:
+- Historical data used: {start} to {end} ({params['num_hist_days']} trading days)
+- Forecast horizon: {days} trading days (~{trading_years:.1f} year{"s" if trading_years != 1 else ""})
+- Number of simulations run: {n_sims:,}
+- Model preset: {preset_name}
+- EWMA decay factor (λ): {ewma_lambda}
+- Student-t degrees of freedom: {t_dof}
+
+PRICE FORECAST (based on {n_sims:,} simulated futures):
+- Current price (starting point): ${S0:.2f}
+- Most likely outcome (median): ${p50:.2f} ({(p50/S0-1)*100:+.1f}%)
+- Optimistic scenario (95th percentile): ${p95:.2f} ({(p95/S0-1)*100:+.1f}%)
+- Pessimistic scenario (5th percentile): ${p5:.2f} ({(p5/S0-1)*100:+.1f}%)
+- Middle range (25th–75th percentile): ${p25:.2f} to ${p75:.2f}
+- Best case across all simulations: ${best:.2f} ({(best/S0-1)*100:+.1f}%)
+- Worst case across all simulations: ${worst:.2f} ({(worst/S0-1)*100:+.1f}%)
+- Probability the stock is higher than today at end of forecast: {prob_gain:.1f}%
+
+RISK METRICS:
+- VaR 95% (maximum expected loss 95% of the time): ${var95:.2f} ({var95/S0*100:.1f}% of investment)
+- CVaR 95% (average loss in the worst 5% of scenarios): ${cvar95:.2f} ({cvar95/S0*100:.1f}% of investment)
+- Probability of losing more than 10%: {prob_loss10:.1f}%
+- Probability of losing more than 25%: {prob_loss25:.1f}%
+
+MODEL CHARACTERISTICS:
+- Volatility regime: {vol_regime}
+- Recent price drift: {drift_desc}
+- Outcome spread (5th to 95th percentile): {spread_desc} ({spread_pct:.0f}% of starting price)
+
+YOUR TASK:
+Write a clear, friendly, and honest summary of these results for a retail investor. Structure your response with these four sections, each with a short bold heading:
+
+1. **What the simulation is telling you** — Summarise the overall picture in 2–3 sentences. Is the model broadly optimistic, bearish, or uncertain? What does the median outcome mean in practical terms?
+
+2. **The range of outcomes** — Explain the spread between the optimistic and pessimistic scenarios in plain English. Help the reader understand what "5th percentile" and "95th percentile" actually mean in real-world terms (e.g. "in roughly 1 in 20 simulations, the stock ended below $X").
+
+3. **The risk picture** — Explain the downside risk in one or two sentences without using "VaR" or "CVaR" — describe what the numbers mean in plain terms. Mention the loss probabilities and what they imply for someone holding this stock.
+
+4. **Important things to keep in mind** — Briefly note 2–3 honest limitations of this model (e.g. it's based on past data, it doesn't know about upcoming earnings or news, the median is not a prediction). End with a one-sentence disclaimer that this is not financial advice.
+
+Keep the total response under 420 words. Do not use bullet points — write in flowing paragraphs. Do not repeat raw numbers excessively — reference them once to anchor the point, then speak to what they mean in human terms."""
+
+        return prompt
+
+    def show_ai_summary(ticker, info, params, paths, pcts, days,
+                        n_sims, preset_name, ewma_lambda, t_dof, start, end):
+        """Call Groq API and stream the AI summary into the UI."""
+        st.subheader("🤖 AI Summary — Plain English Breakdown")
+        st.markdown(
+            "An AI-generated explanation of your simulation results, "
+            "written for everyday investors."
+        )
+
+        groq_key = st.secrets.get("GROQ_API_KEY", "")
+        if not groq_key:
+            st.warning(
+                "Groq API key not configured. Add `GROQ_API_KEY` to your Streamlit secrets "
+                "to enable AI summaries. See deployment instructions for details."
+            )
+            return
+
+        prompt = build_ai_prompt(
+            ticker, info, params, paths, pcts, days,
+            n_sims, preset_name, ewma_lambda, t_dof, start, end,
+        )
+
+        try:
+            client = Groq(api_key=groq_key)
+            with st.spinner("Generating AI summary…"):
+                stream = client.chat.completions.create(
+                    model="llama3-70b-8192",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a clear, honest, and friendly financial educator. "
+                                "You explain quantitative results in plain English for retail investors. "
+                                "You never make price predictions or give investment advice. "
+                                "You always remind users that simulations are based on historical data "
+                                "and are not guarantees of future performance."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.4,
+                    max_tokens=650,
+                    stream=True,
+                )
+
+                # Stream text into a styled container with blinking cursor
+                summary_box = st.empty()
+                full_text   = ""
+                for chunk in stream:
+                    delta      = chunk.choices[0].delta.content or ""
+                    full_text += delta
+                    summary_box.markdown(
+                        f"""<div style="
+                            background: #1a1a2e;
+                            border-left: 4px solid #378ADD;
+                            border-radius: 6px;
+                            padding: 1.2rem 1.5rem;
+                            color: #e0e0e0;
+                            font-size: 0.97rem;
+                            line-height: 1.75;
+                            white-space: pre-wrap;
+                        ">{full_text}▌</div>""",
+                        unsafe_allow_html=True,
+                    )
+
+                # Final render — remove blinking cursor
+                summary_box.markdown(
+                    f"""<div style="
+                        background: #1a1a2e;
+                        border-left: 4px solid #378ADD;
+                        border-radius: 6px;
+                        padding: 1.2rem 1.5rem;
+                        color: #e0e0e0;
+                        font-size: 0.97rem;
+                        line-height: 1.75;
+                        white-space: pre-wrap;
+                    ">{full_text}</div>""",
+                    unsafe_allow_html=True,
+                )
+
+        except Exception as e:
+            st.error(f"AI summary unavailable: {e}")
 
     # ── Downloads ─────────────────────────────────────────────────────────────
 
     def build_csv(paths, pcts, S0, ticker, days, start, end, params,
                   ewma_lambda, t_dof, preset_name) -> bytes:
-        """Build a comprehensive CSV with summary stats, percentiles, and risk metrics."""
-        final   = paths[:, -1]
-        pnl_pct = (final / S0 - 1) * 100
-
-        # ---- Summary block ----
+        final       = paths[:, -1]
+        pnl_pct     = (final / S0 - 1) * 100
         p5, p25, p50, p75, p95 = (np.percentile(final, p) for p in [5, 25, 50, 75, 95])
         prob_profit = np.mean(final > S0) * 100
 
         summary_rows = [
             ["=== SIMULATION SUMMARY ===", ""],
-            ["Ticker",                   ticker],
-            ["Historical start",         str(start)],
-            ["Historical end",           str(end)],
-            ["Trading days in range",    params["num_hist_days"]],
-            ["Days simulated forward",   days],
-            ["Number of simulations",    paths.shape[0]],
-            ["Preset used",              preset_name],
-            ["EWMA lambda",              ewma_lambda],
-            ["Student-t dof",            t_dof],
-            ["Drift window (days)",      params["drift_window_used"]],
+            ["Ticker",                  ticker],
+            ["Historical start",        str(start)],
+            ["Historical end",          str(end)],
+            ["Trading days in range",   params["num_hist_days"]],
+            ["Days simulated forward",  days],
+            ["Number of simulations",   paths.shape[0]],
+            ["Preset used",             preset_name],
+            ["EWMA lambda",             ewma_lambda],
+            ["Student-t dof",           t_dof],
+            ["Drift window (days)",     params["drift_window_used"]],
             ["", ""],
-            ["Starting price (S0)",      f"${S0:.4f}"],
-            ["Median forecast",          f"${p50:.4f}"],
-            ["Median vs S0",             f"{(p50/S0-1)*100:+.2f}%"],
-            ["Probability of gain",      f"{prob_profit:.1f}%"],
-            ["EWMA vol (ann.)",          f"{params['ann_vol_ewma']*100:.2f}%"],
-            ["Simple hist vol (ann.)",   f"{params['ann_vol_simple']*100:.2f}%"],
-            ["Recent drift (ann.)",      f"{params['ann_drift_recent']*100:+.2f}%"],
-            ["Full drift (ann.)",        f"{params['ann_drift_full']*100:+.2f}%"],
+            ["Starting price (S0)",     f"${S0:.4f}"],
+            ["Median forecast",         f"${p50:.4f}"],
+            ["Median vs S0",            f"{(p50/S0-1)*100:+.2f}%"],
+            ["Probability of gain",     f"{prob_profit:.1f}%"],
+            ["EWMA vol (ann.)",         f"{params['ann_vol_ewma']*100:.2f}%"],
+            ["Simple hist vol (ann.)",  f"{params['ann_vol_simple']*100:.2f}%"],
+            ["Recent drift (ann.)",     f"{params['ann_drift_recent']*100:+.2f}%"],
+            ["Full drift (ann.)",       f"{params['ann_drift_full']*100:+.2f}%"],
             ["", ""],
             ["=== PERCENTILE TABLE ===", ""],
             ["Percentile", "Price (USD)", "vs S0 (%)"],
-            ["5th",  f"${p5:.4f}",               f"{(p5/S0-1)*100:+.2f}%"],
-            ["25th", f"${p25:.4f}",              f"{(p25/S0-1)*100:+.2f}%"],
-            ["50th (median)", f"${p50:.4f}",     f"{(p50/S0-1)*100:+.2f}%"],
-            ["75th", f"${p75:.4f}",              f"{(p75/S0-1)*100:+.2f}%"],
-            ["95th", f"${p95:.4f}",              f"{(p95/S0-1)*100:+.2f}%"],
-            ["Worst", f"${np.min(final):.4f}",   f"{(np.min(final)/S0-1)*100:+.2f}%"],
-            ["Best",  f"${np.max(final):.4f}",   f"{(np.max(final)/S0-1)*100:+.2f}%"],
+            ["5th",           f"${p5:.4f}",            f"{(p5/S0-1)*100:+.2f}%"],
+            ["25th",          f"${p25:.4f}",           f"{(p25/S0-1)*100:+.2f}%"],
+            ["50th (median)", f"${p50:.4f}",           f"{(p50/S0-1)*100:+.2f}%"],
+            ["75th",          f"${p75:.4f}",           f"{(p75/S0-1)*100:+.2f}%"],
+            ["95th",          f"${p95:.4f}",           f"{(p95/S0-1)*100:+.2f}%"],
+            ["Worst",         f"${np.min(final):.4f}", f"{(np.min(final)/S0-1)*100:+.2f}%"],
+            ["Best",          f"${np.max(final):.4f}", f"{(np.max(final)/S0-1)*100:+.2f}%"],
             ["", ""],
             ["=== RISK METRICS ===", ""],
             ["Confidence", "VaR (USD)", "VaR (%)", "CVaR (USD)", "CVaR (%)"],
@@ -423,8 +603,7 @@ with tab_sim:
                 f"{cvar_pct:.2f}%",
             ])
 
-        buf = io.StringIO()
-        import csv
+        buf    = io.StringIO()
         writer = csv.writer(buf)
         for row in summary_rows:
             writer.writerow(row)
@@ -442,28 +621,24 @@ with tab_sim:
         st.subheader("💾 Download Results")
         col1, col2 = st.columns(2)
         with col1:
-            png_bytes = fig_to_png(fig)
             st.download_button(
                 label="⬇️ Download chart (PNG)",
-                data=png_bytes,
+                data=fig_to_png(fig),
                 file_name=f"{ticker}_montecarlo_{date.today()}.png",
                 mime="image/png",
                 use_container_width=True,
             )
         with col2:
-            csv_bytes = build_csv(
-                paths, pcts, S0, ticker, days, start, end,
-                params, ewma_lambda, t_dof, preset_name,
-            )
             st.download_button(
                 label="⬇️ Download results (CSV)",
-                data=csv_bytes,
+                data=build_csv(paths, pcts, S0, ticker, days, start, end,
+                               params, ewma_lambda, t_dof, preset_name),
                 file_name=f"{ticker}_montecarlo_{date.today()}.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+    # ── Simulation summary ────────────────────────────────────────────────────
 
     def show_summary(ticker, params, paths, days, start, end, ewma_lambda, t_dof):
         final = paths[:, -1]
@@ -481,7 +656,7 @@ with tab_sim:
 
         with st.expander("Full percentile table"):
             summary_df = pd.DataFrame({
-                "Percentile": ["5th", "25th", "50th (median)", "75th", "95th", "Worst path", "Best path"],
+                "Percentile":  ["5th", "25th", "50th (median)", "75th", "95th", "Worst path", "Best path"],
                 "Price (USD)": [p5, p25, p50, p75, p95, worst, best],
                 "vs S0":       [(v/S0-1) for v in [p5, p25, p50, p75, p95, worst, best]],
             })
@@ -541,7 +716,7 @@ with tab_sim:
         days_x = np.arange(days + 1)
         name   = info.get("longName", ticker.upper())
 
-        # Panel 1 — all paths
+        # Panel 1 — simulation fan
         sample = min(n_sims, 120)
         idx    = np.random.choice(n_sims, sample, replace=False)
         for i in idx:
@@ -578,7 +753,7 @@ with tab_sim:
         ax2.set_ylabel("Number of simulations", color=MUTED, fontsize=9)
         ax2.legend(fontsize=8, framealpha=0.3, labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
 
-        # Panel 3 — historical log-returns
+        # Panel 3 — historical log-returns distribution
         rets   = params["log_returns"] * 100
         mean_r = rets.mean()
         std_r  = rets.std()
@@ -594,8 +769,8 @@ with tab_sim:
         ax3.legend(fontsize=8, framealpha=0.3, labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
 
         # Panel 4 — history + most-likely forecast
-        hist_dates     = [(d.date() if hasattr(d, "date") else d) for d in closes.index]
-        forecast_dates = add_trading_days(hist_dates[-1], days)
+        hist_dates         = [(d.date() if hasattr(d, "date") else d) for d in closes.index]
+        forecast_dates     = add_trading_days(hist_dates[-1], days)
         median_path        = find_median_path(paths, pcts)
         forecast_end_price = median_path[-1]
         pct_change         = (forecast_end_price / S0 - 1) * 100
@@ -700,6 +875,13 @@ with tab_sim:
                 show_risk_metrics(paths, S0, days_forward, ticker)
 
                 st.divider()
+                show_ai_summary(
+                    ticker, info, params, paths, pcts, days_forward,
+                    num_simulations, preset_name, ewma_lambda, t_dof,
+                    start_date, end_date,
+                )
+
+                st.divider()
                 st.subheader("📉 Charts")
                 fig = build_figure(
                     ticker, closes, params, paths, pcts,
@@ -768,26 +950,28 @@ smooths out short-term noise.
 The expected daily drift **μ** is estimated from the mean of log returns over a
 recent window (default: last 63 trading days ≈ 3 months), rather than the full
 historical period. This makes the model sensitive to current momentum rather than
-anchoring to where the stock was years ago. You can override drift manually if you
-have a specific return assumption.
+anchoring to where the stock was years ago.
 
 ### 5. Simulate price paths — GBM with fat tails
 Each simulation path is generated day-by-day using the GBM formula:
 
 > **S_{t+1} = S_t · exp( (μ − ½σ²) + σ · Z_t )**
 
-where **Z_t** is a random shock. Crucially, instead of drawing Z from a standard
-normal distribution, this model draws from a **Student's t-distribution** with
+where **Z_t** is a random shock drawn from a **Student's t-distribution** with
 user-configurable degrees of freedom (default: 5). The t-distribution has heavier
-tails than the normal — meaning extreme daily moves (crashes, short squeezes) occur
-more often, as they do in real markets. The draws are rescaled so the distribution
-still has unit variance, preserving the meaning of σ.
+tails than the normal — meaning extreme daily moves occur more often, as they do
+in real markets.
 
 ### 6. Aggregate results
-After running all simulations, the model computes:
-- **Percentile bands** (5th, 25th, 50th, 75th, 95th) across all paths at every time step
-- A **"most-likely" path** — the single simulated path whose final price is closest to the median
-- **VaR and CVaR** from the distribution of final prices
+After running all simulations, the model computes percentile bands, a most-likely
+path, VaR/CVaR risk metrics, and feeds everything to the AI summary engine.
+
+---
+
+## AI Summary
+After each simulation, results are sent to **Llama 3 70B** (via Groq) which generates
+a plain-English explanation tailored for retail investors — covering the forecast
+outlook, range of outcomes, risk picture, and model limitations.
 
 ---
 
@@ -799,8 +983,7 @@ After running all simulations, the model computes:
 | **CVaR / Expected Shortfall** | "If I end up in the worst X% of outcomes, what is my average loss?" |
 
 CVaR is considered a more complete risk measure than VaR because it captures the
-*severity* of tail events, not just their threshold. A stock with VaR 95% = $5 and
-CVaR 95% = $20 has a much heavier tail than one where both figures are similar.
+*severity* of tail events, not just their threshold.
 
 ---
 
@@ -817,23 +1000,15 @@ CVaR 95% = $20 has a much heavier tail than one where both figures are similar.
 
 ## Limitations & important disclaimers
 
-- **GBM assumes constant volatility and drift.** Real markets exhibit volatility
-  clustering, mean reversion, jumps, and regime changes that this model does not
-  fully capture.
-- **Past price behaviour does not guarantee future results.** The model is calibrated
-  entirely on historical data. A stock that trended strongly upward for a year may
-  not continue to do so.
-- **The "most-likely forecast" line is the median of a distribution, not a prediction.**
-  By construction, roughly half of all simulated paths end above it and half below.
-- **VaR and CVaR are model-derived estimates.** They depend on the model's assumptions
-  and the historical window chosen. They are not guarantees.
-- This tool is intended for **educational and analytical purposes only** and does not
-  constitute financial advice. Always consult a qualified financial professional before
-  making investment decisions.
+- **GBM assumes constant volatility and drift.** Real markets exhibit volatility clustering, mean reversion, jumps, and regime changes that this model does not fully capture.
+- **Past price behaviour does not guarantee future results.**
+- **The "most-likely forecast" line is the median of a distribution, not a prediction.** By construction, roughly half of all simulated paths end above it and half below.
+- **VaR and CVaR are model-derived estimates**, not guarantees.
+- This tool is intended for **educational and analytical purposes only** and does not constitute financial advice. Always consult a qualified financial professional before making investment decisions.
 
 ---
 
 ## Technology
 
-Built with **Python**, **Streamlit**, **yfinance**, **NumPy**, **SciPy**, and **Matplotlib**.
-""")
+Built with **Python**, **Streamlit**, **yfinance**, **NumPy**, **SciPy**, **Matplotlib**, and **Groq (Llama 3 70B)**.
+    """)
