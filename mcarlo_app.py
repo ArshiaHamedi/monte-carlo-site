@@ -1,20 +1,15 @@
 """
 monte carlo stock price simulation - streamlit app
 ====================================================
-all data derived from yfinance and cached for performance 
+all data derived from yfinance and cached for performance
 run with:
     streamlit run mcarlo_app.py
-
-optimizations applied:
-  1. EWMA volatility (recent returns weighted more heavily)
-  2. Student's t-distribution for fat-tailed returns
-  3. Recent-window drift (63-day default) separate from long-window vol
-  4. Removed fixed random seed for true stochastic behaviour
 """
 
 import warnings
 warnings.filterwarnings("ignore")
 
+import io
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -34,297 +29,468 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("📈 Price Action Forecast via Monte Carlo Simulation")
-st.markdown(
-    "Fetches real historical data via **yfinance** and simulates future price "
-    "paths using **Geometric Brownian Motion (GBM)** with EWMA volatility and "
-    "fat-tailed returns."
-)
+# ── Preset definitions ────────────────────────────────────────────────────────
 
-# ── Sidebar — all user inputs ─────────────────────────────────────────────────
+PRESETS = {
+    "Custom": None,   # sentinel — means "don't overwrite sliders"
+    "Conservative": {
+        "vol_scale":    0.75,
+        "ewma_lambda":  0.97,
+        "t_dof":        15,
+        "drift_window": 126,
+        "description":  "Lower volatility, slow EWMA decay, near-normal tails, long drift window. "
+                        "Best for large-cap, low-beta stocks (e.g. JNJ, KO, BRK).",
+    },
+    "Balanced": {
+        "vol_scale":    1.0,
+        "ewma_lambda":  0.94,
+        "t_dof":        5,
+        "drift_window": 63,
+        "description":  "RiskMetrics defaults with fat tails and a 3-month drift window. "
+                        "A solid starting point for most equities.",
+    },
+    "Aggressive": {
+        "vol_scale":    1.5,
+        "ewma_lambda":  0.90,
+        "t_dof":        3,
+        "drift_window": 42,
+        "description":  "Amplified volatility, fast EWMA decay, very fat tails. "
+                        "Suitable for high-beta or speculative names (e.g. TSLA, MSTR, MEME stocks).",
+    },
+    "Momentum": {
+        "vol_scale":    1.0,
+        "ewma_lambda":  0.92,
+        "t_dof":        5,
+        "drift_window": 21,
+        "description":  "Standard vol but extremely short drift window (1 month). "
+                        "Captures near-term momentum; useful when a stock is in a strong trend.",
+    },
+}
 
-with st.sidebar:
-    st.header("⚙️ Simulation Parameters")
+# ── Tab layout ────────────────────────────────────────────────────────────────
 
-    ticker = st.text_input(
-        "Ticker symbol",
-        value="AAPL",
-        help="e.g. AAPL, TSLA, NVDA, SPY",
-    ).strip().upper()
+tab_sim, tab_about = st.tabs(["📈 Simulator", "📖 About & Methodology"])
 
-    st.subheader("Historical data window")
-    today  = date.today()
-    one_yr = today - timedelta(days=365)
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — SIMULATOR
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    start_date = st.date_input(
-        "Start date",
-        value=one_yr,
-        max_value=today - timedelta(days=31),
-        help="Must be at least 30 days before end date.",
-    )
-    end_date = st.date_input(
-        "End date",
-        value=today,
-        min_value=start_date + timedelta(days=30),
-        max_value=today,
-    )
+with tab_sim:
 
-    st.subheader("Forecast settings")
-    days_forward = st.slider(
-        "Trading days to simulate forward",
-        min_value=21,
-        max_value=756,
-        value=252,
-        step=21,
-        help="252 ≈ 1 year of trading days.",
-    )
-    num_simulations = st.slider(
-        "Number of simulations",
-        min_value=100,
-        max_value=10000,
-        value=500,
-        step=100,
-    )
-
-    st.subheader("Advanced")
-    vol_scale = st.slider(
-        "Volatility multiplier",
-        min_value=0.25,
-        max_value=3.0,
-        value=1.0,
-        step=0.25,
-        help="1.0 = model vol. 2.0 = double, 0.5 = half.",
+    st.title("📈 Price Action Forecast via Monte Carlo Simulation")
+    st.markdown(
+        "Fetches real historical data via **yfinance** and simulates future price "
+        "paths using **Geometric Brownian Motion (GBM)** with EWMA volatility and "
+        "fat-tailed returns."
     )
 
-    ewma_lambda = st.slider(
-        "EWMA decay factor (λ)",
-        min_value=0.80,
-        max_value=0.99,
-        value=0.94,
-        step=0.01,
-        help=(
-            "Controls how fast older returns decay. "
-            "0.94 = RiskMetrics standard (favours recent vol). "
-            "0.99 = slower decay (closer to simple historical vol)."
-        ),
-    )
+    # ── Sidebar ───────────────────────────────────────────────────────────────
 
-    t_dof = st.slider(
-        "Student-t degrees of freedom",
-        min_value=3,
-        max_value=30,
-        value=5,
-        step=1,
-        help=(
-            "Lower = fatter tails (more extreme outcomes). "
-            "3–6 is realistic for equities. "
-            "30 ≈ normal distribution."
-        ),
-    )
+    with st.sidebar:
+        st.header("⚙️ Simulation Parameters")
 
-    drift_window = st.slider(
-        "Recent drift window (trading days)",
-        min_value=21,
-        max_value=252,
-        value=63,
-        step=21,
-        help=(
-            "Number of recent trading days used to estimate drift. "
-            "63 ≈ 3 months. Shorter = more momentum-sensitive."
-        ),
-    )
+        ticker = st.text_input(
+            "Ticker symbol",
+            value="AAPL",
+            help="e.g. AAPL, TSLA, NVDA, SPY",
+        ).strip().upper()
 
-    use_drift_override = st.checkbox("Override drift manually?", value=False)
-    drift_override = None
-    if use_drift_override:
-        drift_override = st.number_input(
-            "Annual drift (e.g. 0.10 = +10%)",
-            min_value=-1.0,
-            max_value=2.0,
-            value=0.10,
-            step=0.01,
-            format="%.2f",
+        st.subheader("Historical data window")
+        today  = date.today()
+        one_yr = today - timedelta(days=365)
+
+        start_date = st.date_input(
+            "Start date",
+            value=one_yr,
+            max_value=today - timedelta(days=31),
+            help="Must be at least 30 days before end date.",
+        )
+        end_date = st.date_input(
+            "End date",
+            value=today,
+            min_value=start_date + timedelta(days=30),
+            max_value=today,
         )
 
-    run_btn = st.button("▶ Run Simulation", type="primary", use_container_width=True)
-
-# ── Helper functions ──────────────────────────────────────────────────────────
-
-def apply_grid(ax, date_axis=False):
-    GRID_MAJOR = "#2e2e2e"
-    GRID_MINOR = "#222222"
-    ax.grid(which="major", color=GRID_MAJOR, linewidth=0.7, linestyle="-",  zorder=0)
-    ax.grid(which="minor", color=GRID_MINOR, linewidth=0.4, linestyle="--", zorder=0)
-    ax.set_axisbelow(True)
-    if date_axis:
-        ax.xaxis.set_minor_locator(mdates.MonthLocator(interval=1))
-        ax.yaxis.set_minor_locator(mticker.AutoMinorLocator(4))
-    else:
-        ax.xaxis.set_minor_locator(mticker.AutoMinorLocator(4))
-        ax.yaxis.set_minor_locator(mticker.AutoMinorLocator(4))
-
-
-def add_trading_days(from_date: date, n_days: int) -> list:
-    dates, cursor = [], from_date
-    while len(dates) < n_days:
-        cursor += timedelta(days=1)
-        if cursor.weekday() < 5:
-            dates.append(cursor)
-    return dates
-
-
-@st.cache_data(show_spinner="Fetching historical data from yfinance…")
-def fetch_data(ticker: str, start: date, end: date):
-    """Cached: same ticker+range won't re-hit yfinance on every widget change."""
-    end_inclusive = end + timedelta(days=1)
-    df = yf.download(
-        ticker,
-        start=str(start),
-        end=str(end_inclusive),
-        interval="1d",
-        auto_adjust=True,
-        progress=False,
-    )
-    if df.empty:
-        raise ValueError(
-            f"No data found for **{ticker}** in the range {start} → {end}. "
-            "Check the ticker symbol and date range."
+        st.subheader("Forecast settings")
+        days_forward = st.slider(
+            "Trading days to simulate forward",
+            min_value=21, max_value=756, value=252, step=21,
+            help="252 ≈ 1 year of trading days.",
         )
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
-    closes = df["Close"].dropna()
-    if len(closes) < 20:
-        raise ValueError(
-            f"Only {len(closes)} trading days in range. Need at least 20 — widen the date range."
+        num_simulations = st.slider(
+            "Number of simulations",
+            min_value=100, max_value=10000, value=500, step=100,
         )
-    info = {}
-    try:
-        info = yf.Ticker(ticker).info
-    except Exception:
-        pass
-    return closes, info
 
+        # ── Preset picker ─────────────────────────────────────────────────────
+        st.subheader("Model preset")
+        preset_name = st.selectbox(
+            "Choose a preset",
+            options=list(PRESETS.keys()),
+            index=1,   # default to "Conservative"
+            help="Presets auto-fill the Advanced sliders below. Switch to Custom to tweak freely.",
+        )
 
-def compute_ewma_vol(log_returns: pd.Series, lam: float) -> float:
-    """
-    Exponentially Weighted Moving Average volatility (daily).
-    Gives more weight to recent returns; older returns decay by factor λ per day.
-    RiskMetrics standard: λ = 0.94.
-    """
-    squared  = log_returns.values ** 2
-    ewma_var = squared[0]
-    for r2 in squared[1:]:
-        ewma_var = lam * ewma_var + (1 - lam) * r2
-    return float(np.sqrt(ewma_var))
+        preset = PRESETS[preset_name]
+        if preset:
+            st.caption(f"ℹ️ {preset['description']}")
 
+        # ── Advanced sliders (pre-filled by preset if not Custom) ─────────────
+        st.subheader("Advanced")
 
-def compute_parameters(
-    closes: pd.Series,
-    drift_override=None,
-    vol_scale: float = 1.0,
-    ewma_lambda: float = 0.94,
-    drift_window: int = 63,
-) -> dict:
-    log_returns = np.log(closes / closes.shift(1)).dropna()
+        def _val(key, default):
+            return preset[key] if preset else default
 
-    # Long-window stats for reporting
-    ann_drift_full = log_returns.mean() * 252
-    ann_vol_simple = log_returns.std() * np.sqrt(252)
+        vol_scale = st.slider(
+            "Volatility multiplier",
+            min_value=0.25, max_value=3.0, step=0.25,
+            value=_val("vol_scale", 1.0),
+            help="1.0 = model vol. 2.0 = double, 0.5 = half.",
+        )
+        ewma_lambda = st.slider(
+            "EWMA decay factor (λ)",
+            min_value=0.80, max_value=0.99, step=0.01,
+            value=_val("ewma_lambda", 0.94),
+            help=(
+                "Controls how fast older returns decay. "
+                "0.94 = RiskMetrics standard. "
+                "0.99 = slower decay (closer to simple historical vol)."
+            ),
+        )
+        t_dof = st.slider(
+            "Student-t degrees of freedom",
+            min_value=3, max_value=30, step=1,
+            value=_val("t_dof", 5),
+            help="Lower = fatter tails. 3–6 is realistic for equities. 30 ≈ normal.",
+        )
+        drift_window = st.slider(
+            "Recent drift window (trading days)",
+            min_value=21, max_value=252, step=21,
+            value=_val("drift_window", 63),
+            help="Number of recent trading days used to estimate drift. 63 ≈ 3 months.",
+        )
 
-    # Optimization 1: EWMA volatility
-    daily_ewma_vol = compute_ewma_vol(log_returns, ewma_lambda)
-    ann_vol_ewma   = daily_ewma_vol * np.sqrt(252)
+        use_drift_override = st.checkbox("Override drift manually?", value=False)
+        drift_override = None
+        if use_drift_override:
+            drift_override = st.number_input(
+                "Annual drift (e.g. 0.10 = +10%)",
+                min_value=-1.0, max_value=2.0, value=0.10, step=0.01, format="%.2f",
+            )
 
-    # Optimization 3: recent-window drift
-    recent_returns   = log_returns.iloc[-drift_window:] if len(log_returns) >= drift_window else log_returns
-    daily_drift      = recent_returns.mean()
-    ann_drift_recent = daily_drift * 252
+        run_btn = st.button("▶ Run Simulation", type="primary", use_container_width=True)
 
-    if drift_override is not None:
-        daily_drift = drift_override / 252
+    # ── Core functions ────────────────────────────────────────────────────────
 
-    daily_std_scaled = daily_ewma_vol * vol_scale
+    def apply_grid(ax, date_axis=False):
+        GRID_MAJOR = "#2e2e2e"
+        GRID_MINOR = "#222222"
+        ax.grid(which="major", color=GRID_MAJOR, linewidth=0.7, linestyle="-",  zorder=0)
+        ax.grid(which="minor", color=GRID_MINOR, linewidth=0.4, linestyle="--", zorder=0)
+        ax.set_axisbelow(True)
+        if date_axis:
+            ax.xaxis.set_minor_locator(mdates.MonthLocator(interval=1))
+            ax.yaxis.set_minor_locator(mticker.AutoMinorLocator(4))
+        else:
+            ax.xaxis.set_minor_locator(mticker.AutoMinorLocator(4))
+            ax.yaxis.set_minor_locator(mticker.AutoMinorLocator(4))
 
-    return {
-        "daily_mean":        daily_drift,
-        "daily_std":         daily_std_scaled,
-        "ann_drift_full":    ann_drift_full,
-        "ann_drift_recent":  ann_drift_recent,
-        "ann_vol_simple":    ann_vol_simple,
-        "ann_vol_ewma":      ann_vol_ewma,
-        "ann_vol_scaled":    daily_std_scaled * np.sqrt(252),
-        "log_returns":       log_returns,
-        "last_price":        float(closes.iloc[-1]),
-        "num_hist_days":     len(closes),
-        "drift_window_used": min(drift_window, len(log_returns)),
-    }
+    def add_trading_days(from_date: date, n_days: int) -> list:
+        dates, cursor = [], from_date
+        while len(dates) < n_days:
+            cursor += timedelta(days=1)
+            if cursor.weekday() < 5:
+                dates.append(cursor)
+        return dates
 
+    @st.cache_data(show_spinner="Fetching historical data from yfinance…")
+    def fetch_data(ticker: str, start: date, end: date):
+        end_inclusive = end + timedelta(days=1)
+        df = yf.download(
+            ticker,
+            start=str(start),
+            end=str(end_inclusive),
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+        )
+        if df.empty:
+            raise ValueError(
+                f"No data found for **{ticker}** in the range {start} → {end}. "
+                "Check the ticker symbol and date range."
+            )
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        closes = df["Close"].dropna()
+        if len(closes) < 20:
+            raise ValueError(
+                f"Only {len(closes)} trading days in range. Need at least 20 — widen the date range."
+            )
+        info = {}
+        try:
+            info = yf.Ticker(ticker).info
+        except Exception:
+            pass
+        return closes, info
 
-def run_simulation(params: dict, days: int, n_sims: int, t_dof: int) -> np.ndarray:
-    """
-    GBM simulation with:
-    - Optimization 2: Student-t shocks (fat tails) instead of normal distribution
-    - Optimization 4: No fixed random seed — true stochastic each run
-    """
-    mu    = params["daily_mean"]
-    sigma = params["daily_std"]
-    S0    = params["last_price"]
+    def compute_ewma_vol(log_returns: pd.Series, lam: float) -> float:
+        squared  = log_returns.values ** 2
+        ewma_var = squared[0]
+        for r2 in squared[1:]:
+            ewma_var = lam * ewma_var + (1 - lam) * r2
+        return float(np.sqrt(ewma_var))
 
-    # Draw from Student-t, then scale to unit variance so sigma still means sigma
-    raw          = student_t.rvs(df=t_dof, size=(n_sims, days))
-    scale_factor = np.sqrt(t_dof / (t_dof - 2))  # variance of t(df) = df/(df-2)
-    Z            = raw / scale_factor              # normalised to variance = 1
+    def compute_parameters(closes, drift_override=None, vol_scale=1.0,
+                           ewma_lambda=0.94, drift_window=63):
+        log_returns    = np.log(closes / closes.shift(1)).dropna()
+        ann_drift_full = log_returns.mean() * 252
+        ann_vol_simple = log_returns.std()  * np.sqrt(252)
+        daily_ewma_vol = compute_ewma_vol(log_returns, ewma_lambda)
+        ann_vol_ewma   = daily_ewma_vol * np.sqrt(252)
+        recent_returns   = log_returns.iloc[-drift_window:] if len(log_returns) >= drift_window else log_returns
+        daily_drift      = recent_returns.mean()
+        ann_drift_recent = daily_drift * 252
+        if drift_override is not None:
+            daily_drift = drift_override / 252
+        daily_std_scaled = daily_ewma_vol * vol_scale
+        return {
+            "daily_mean":        daily_drift,
+            "daily_std":         daily_std_scaled,
+            "ann_drift_full":    ann_drift_full,
+            "ann_drift_recent":  ann_drift_recent,
+            "ann_vol_simple":    ann_vol_simple,
+            "ann_vol_ewma":      ann_vol_ewma,
+            "ann_vol_scaled":    daily_std_scaled * np.sqrt(252),
+            "log_returns":       log_returns,
+            "last_price":        float(closes.iloc[-1]),
+            "num_hist_days":     len(closes),
+            "drift_window_used": min(drift_window, len(log_returns)),
+        }
 
-    daily_returns = (mu - 0.5 * sigma**2) + sigma * Z
-    log_paths     = np.concatenate([np.zeros((n_sims, 1)), daily_returns], axis=1)
-    return S0 * np.exp(np.cumsum(log_paths, axis=1))
+    def run_simulation(params, days, n_sims, t_dof):
+        mu, sigma, S0 = params["daily_mean"], params["daily_std"], params["last_price"]
+        raw          = student_t.rvs(df=t_dof, size=(n_sims, days))
+        scale_factor = np.sqrt(t_dof / (t_dof - 2))
+        Z            = raw / scale_factor
+        daily_returns = (mu - 0.5 * sigma**2) + sigma * Z
+        log_paths     = np.concatenate([np.zeros((n_sims, 1)), daily_returns], axis=1)
+        return S0 * np.exp(np.cumsum(log_paths, axis=1))
 
+    def compute_percentiles(paths):
+        return {
+            "p5":  np.percentile(paths,  5, axis=0),
+            "p25": np.percentile(paths, 25, axis=0),
+            "p50": np.percentile(paths, 50, axis=0),
+            "p75": np.percentile(paths, 75, axis=0),
+            "p95": np.percentile(paths, 95, axis=0),
+        }
 
-def compute_percentiles(paths: np.ndarray) -> dict:
-    return {
-        "p5":  np.percentile(paths,  5, axis=0),
-        "p25": np.percentile(paths, 25, axis=0),
-        "p50": np.percentile(paths, 50, axis=0),
-        "p75": np.percentile(paths, 75, axis=0),
-        "p95": np.percentile(paths, 95, axis=0),
-    }
+    def find_median_path(paths, pcts):
+        closest_idx = np.argmin(np.abs(paths[:, -1] - pcts["p50"][-1]))
+        return paths[closest_idx]
 
+    # ── VaR & CVaR ───────────────────────────────────────────────────────────
 
-def find_median_path(paths: np.ndarray, pcts: dict) -> np.ndarray:
-    median_final = pcts["p50"][-1]
-    closest_idx  = np.argmin(np.abs(paths[:, -1] - median_final))
-    return paths[closest_idx]
+    def compute_risk_metrics(paths, S0, confidence_levels=(0.90, 0.95, 0.99)):
+        """
+        Compute VaR and CVaR (Expected Shortfall) from the simulated final
+        price distribution, expressed both in dollar terms and as a % of S0.
+        """
+        final_prices   = paths[:, -1]
+        pnl            = final_prices - S0          # profit / loss per share
+        pnl_pct        = (final_prices / S0 - 1) * 100
 
+        rows = []
+        for cl in confidence_levels:
+            alpha     = 1 - cl                       # e.g. 0.05 for 95% CL
+            var_usd   = -np.percentile(pnl, alpha * 100)
+            var_pct   = -np.percentile(pnl_pct, alpha * 100)
+            # CVaR = mean of losses beyond the VaR threshold
+            tail_mask = pnl <= -var_usd
+            cvar_usd  = -pnl[tail_mask].mean() if tail_mask.any() else var_usd
+            cvar_pct  = -pnl_pct[tail_mask].mean() if tail_mask.any() else var_pct
+            rows.append({
+                "Confidence level": f"{int(cl*100)}%",
+                "VaR (USD)":        f"${var_usd:.2f}",
+                "VaR (% of S0)":    f"{var_pct:.1f}%",
+                "CVaR / ES (USD)":  f"${cvar_usd:.2f}",
+                "CVaR / ES (% of S0)": f"{cvar_pct:.1f}%",
+            })
+        return pd.DataFrame(rows)
 
-# ── Summary metrics ───────────────────────────────────────────────────────────
+    def show_risk_metrics(paths, S0, days, ticker):
+        st.subheader("⚠️ Risk Metrics — VaR & CVaR")
+        st.markdown(
+            f"Tail-risk estimates for **{ticker}** over **{days} trading days**, "
+            "derived from the full simulated final-price distribution."
+        )
 
-def show_summary(ticker, params, paths, days, start, end, ewma_lambda, t_dof):
-    final = paths[:, -1]
-    S0    = params["last_price"]
-    p5, p25, p50, p75, p95 = (np.percentile(final, p) for p in [5, 25, 50, 75, 95])
-    prob_profit = np.mean(final > S0) * 100
-    worst, best = np.min(final), np.max(final)
+        risk_df = compute_risk_metrics(paths, S0)
+        st.dataframe(risk_df, use_container_width=True, hide_index=True)
 
-    st.subheader("📊 Simulation Summary")
+        col1, col2 = st.columns(2)
+        final   = paths[:, -1]
+        pnl_pct = (final / S0 - 1) * 100
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Starting price (S0)",    f"${S0:.2f}")
-    col2.metric("Median forecast",        f"${p50:.2f}", f"{(p50/S0-1):+.1%}")
-    col3.metric("Probability of gain",    f"{prob_profit:.1f}%")
-    col4.metric("EWMA volatility (ann.)", f"{params['ann_vol_ewma']:.1%}")
+        with col1:
+            var95  = -np.percentile((final - S0), 5)
+            cvar95 = -(final - S0)[final - S0 <= -var95].mean()
+            st.metric("VaR 95%",        f"${var95:.2f}",  f"{-var95/S0*100:.1f}% of S0")
+            st.metric("CVaR 95% (ES)",  f"${cvar95:.2f}", f"{-cvar95/S0*100:.1f}% of S0")
 
-    with st.expander("Full percentile table"):
-        summary_df = pd.DataFrame({
-            "Percentile": ["5th", "25th", "50th (median)", "75th", "95th", "Worst path", "Best path"],
-            "Price (USD)": [p5, p25, p50, p75, p95, worst, best],
-            "vs S0":       [(v/S0-1) for v in [p5, p25, p50, p75, p95, worst, best]],
-        })
-        summary_df["Price (USD)"] = summary_df["Price (USD)"].map("${:.2f}".format)
-        summary_df["vs S0"]       = summary_df["vs S0"].map("{:+.1%}".format)
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        with col2:
+            prob_loss_10 = np.mean(pnl_pct < -10) * 100
+            prob_loss_25 = np.mean(pnl_pct < -25) * 100
+            st.metric("Prob. of >10% loss", f"{prob_loss_10:.1f}%")
+            st.metric("Prob. of >25% loss", f"{prob_loss_25:.1f}%")
 
-    with st.expander("Model parameters"):
-        st.markdown(f"""
+        with st.expander("What do these numbers mean?"):
+            st.markdown("""
+**VaR (Value at Risk)** answers: *"What is the maximum loss I should expect to NOT exceed, X% of the time?"*
+
+- **VaR 95%** = there is a 5% chance of losing *more* than this amount over the forecast horizon.
+- **VaR 99%** = there is a 1% chance of losing more than this amount.
+
+**CVaR (Conditional VaR) / Expected Shortfall** answers: *"If I do end up in the worst tail, what is my average loss?"*
+
+- CVaR is always ≥ VaR. It is considered a superior risk measure because it tells you the *severity* of bad outcomes, not just a threshold.
+- A stock with VaR 95% = $5 and CVaR 95% = $12 has a heavier tail than one where both values are close together.
+
+> ⚠️ These figures are model-derived estimates based on historical price behaviour. They are not guarantees and should not be used as the sole basis for investment decisions.
+            """)
+
+    # ── Downloads ─────────────────────────────────────────────────────────────
+
+    def build_csv(paths, pcts, S0, ticker, days, start, end, params,
+                  ewma_lambda, t_dof, preset_name) -> bytes:
+        """Build a comprehensive CSV with summary stats, percentiles, and risk metrics."""
+        final   = paths[:, -1]
+        pnl_pct = (final / S0 - 1) * 100
+
+        # ---- Summary block ----
+        p5, p25, p50, p75, p95 = (np.percentile(final, p) for p in [5, 25, 50, 75, 95])
+        prob_profit = np.mean(final > S0) * 100
+
+        summary_rows = [
+            ["=== SIMULATION SUMMARY ===", ""],
+            ["Ticker",                   ticker],
+            ["Historical start",         str(start)],
+            ["Historical end",           str(end)],
+            ["Trading days in range",    params["num_hist_days"]],
+            ["Days simulated forward",   days],
+            ["Number of simulations",    paths.shape[0]],
+            ["Preset used",              preset_name],
+            ["EWMA lambda",              ewma_lambda],
+            ["Student-t dof",            t_dof],
+            ["Drift window (days)",      params["drift_window_used"]],
+            ["", ""],
+            ["Starting price (S0)",      f"${S0:.4f}"],
+            ["Median forecast",          f"${p50:.4f}"],
+            ["Median vs S0",             f"{(p50/S0-1)*100:+.2f}%"],
+            ["Probability of gain",      f"{prob_profit:.1f}%"],
+            ["EWMA vol (ann.)",          f"{params['ann_vol_ewma']*100:.2f}%"],
+            ["Simple hist vol (ann.)",   f"{params['ann_vol_simple']*100:.2f}%"],
+            ["Recent drift (ann.)",      f"{params['ann_drift_recent']*100:+.2f}%"],
+            ["Full drift (ann.)",        f"{params['ann_drift_full']*100:+.2f}%"],
+            ["", ""],
+            ["=== PERCENTILE TABLE ===", ""],
+            ["Percentile", "Price (USD)", "vs S0 (%)"],
+            ["5th",  f"${p5:.4f}",               f"{(p5/S0-1)*100:+.2f}%"],
+            ["25th", f"${p25:.4f}",              f"{(p25/S0-1)*100:+.2f}%"],
+            ["50th (median)", f"${p50:.4f}",     f"{(p50/S0-1)*100:+.2f}%"],
+            ["75th", f"${p75:.4f}",              f"{(p75/S0-1)*100:+.2f}%"],
+            ["95th", f"${p95:.4f}",              f"{(p95/S0-1)*100:+.2f}%"],
+            ["Worst", f"${np.min(final):.4f}",   f"{(np.min(final)/S0-1)*100:+.2f}%"],
+            ["Best",  f"${np.max(final):.4f}",   f"{(np.max(final)/S0-1)*100:+.2f}%"],
+            ["", ""],
+            ["=== RISK METRICS ===", ""],
+            ["Confidence", "VaR (USD)", "VaR (%)", "CVaR (USD)", "CVaR (%)"],
+        ]
+
+        for cl in [0.90, 0.95, 0.99]:
+            alpha     = 1 - cl
+            var_usd   = -np.percentile(final - S0, alpha * 100)
+            var_pct   = -np.percentile(pnl_pct, alpha * 100)
+            tail_mask = (final - S0) <= -var_usd
+            cvar_usd  = -(final - S0)[tail_mask].mean() if tail_mask.any() else var_usd
+            cvar_pct  = -pnl_pct[tail_mask].mean()      if tail_mask.any() else var_pct
+            summary_rows.append([
+                f"{int(cl*100)}%",
+                f"${var_usd:.4f}",
+                f"{var_pct:.2f}%",
+                f"${cvar_usd:.4f}",
+                f"{cvar_pct:.2f}%",
+            ])
+
+        buf = io.StringIO()
+        import csv
+        writer = csv.writer(buf)
+        for row in summary_rows:
+            writer.writerow(row)
+        return buf.getvalue().encode()
+
+    def fig_to_png(fig) -> bytes:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                    facecolor=fig.get_facecolor())
+        buf.seek(0)
+        return buf.read()
+
+    def show_downloads(fig, paths, pcts, S0, ticker, days,
+                       start, end, params, ewma_lambda, t_dof, preset_name):
+        st.subheader("💾 Download Results")
+        col1, col2 = st.columns(2)
+        with col1:
+            png_bytes = fig_to_png(fig)
+            st.download_button(
+                label="⬇️ Download chart (PNG)",
+                data=png_bytes,
+                file_name=f"{ticker}_montecarlo_{date.today()}.png",
+                mime="image/png",
+                use_container_width=True,
+            )
+        with col2:
+            csv_bytes = build_csv(
+                paths, pcts, S0, ticker, days, start, end,
+                params, ewma_lambda, t_dof, preset_name,
+            )
+            st.download_button(
+                label="⬇️ Download results (CSV)",
+                data=csv_bytes,
+                file_name=f"{ticker}_montecarlo_{date.today()}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+
+    def show_summary(ticker, params, paths, days, start, end, ewma_lambda, t_dof):
+        final = paths[:, -1]
+        S0    = params["last_price"]
+        p5, p25, p50, p75, p95 = (np.percentile(final, p) for p in [5, 25, 50, 75, 95])
+        prob_profit = np.mean(final > S0) * 100
+        worst, best = np.min(final), np.max(final)
+
+        st.subheader("📊 Simulation Summary")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Starting price (S0)",    f"${S0:.2f}")
+        col2.metric("Median forecast",        f"${p50:.2f}", f"{(p50/S0-1):+.1%}")
+        col3.metric("Probability of gain",    f"{prob_profit:.1f}%")
+        col4.metric("EWMA volatility (ann.)", f"{params['ann_vol_ewma']:.1%}")
+
+        with st.expander("Full percentile table"):
+            summary_df = pd.DataFrame({
+                "Percentile": ["5th", "25th", "50th (median)", "75th", "95th", "Worst path", "Best path"],
+                "Price (USD)": [p5, p25, p50, p75, p95, worst, best],
+                "vs S0":       [(v/S0-1) for v in [p5, p25, p50, p75, p95, worst, best]],
+            })
+            summary_df["Price (USD)"] = summary_df["Price (USD)"].map("${:.2f}".format)
+            summary_df["vs S0"]       = summary_df["vs S0"].map("{:+.1%}".format)
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+        with st.expander("Model parameters"):
+            st.markdown(f"""
 | Parameter | Value |
 |---|---|
 | Historical data range | {start} → {end} |
@@ -336,218 +502,338 @@ def show_summary(ticker, params, paths, days, start, end, ewma_lambda, t_dof):
 | Simulated vol (ann., scaled) | {params['ann_vol_scaled']:.1%} |
 | Student-t degrees of freedom | {t_dof} |
 | Days simulated forward | {days} |
-        """)
+            """)
 
+    # ── Plot ──────────────────────────────────────────────────────────────────
 
-# ── Plot ──────────────────────────────────────────────────────────────────────
+    def build_figure(ticker, closes, params, paths, pcts, days, n_sims, info, start, end):
+        PANEL_BG = "#1a1a1a"
+        TEXT     = "#e0e0e0"
+        MUTED    = "#777777"
+        BLUE     = "#378ADD"
+        GREEN    = "#639922"
+        RED      = "#D85A30"
+        AMBER    = "#BA7517"
+        HIST_COL = "#1c3a5e"
+        FORE_COL = "#4caf78"
 
-def build_figure(ticker, closes, params, paths, pcts, days, n_sims, info, start, end):
-    PANEL_BG = "#1a1a1a"
-    TEXT     = "#e0e0e0"
-    MUTED    = "#777777"
-    BLUE     = "#378ADD"
-    GREEN    = "#639922"
-    RED      = "#D85A30"
-    AMBER    = "#BA7517"
-    HIST_COL = "#1c3a5e"
-    FORE_COL = "#4caf78"
+        fig = plt.figure(figsize=(15, 14))
+        fig.patch.set_facecolor("#0f0f0f")
 
-    fig = plt.figure(figsize=(15, 14))
-    fig.patch.set_facecolor("#0f0f0f")
+        gs = gridspec.GridSpec(
+            3, 2, figure=fig,
+            height_ratios=[1.1, 1, 1.2],
+            hspace=0.52, wspace=0.32,
+        )
+        ax1 = fig.add_subplot(gs[0, :])
+        ax2 = fig.add_subplot(gs[1, 0])
+        ax3 = fig.add_subplot(gs[1, 1])
+        ax4 = fig.add_subplot(gs[2, :])
 
-    gs = gridspec.GridSpec(
-        3, 2, figure=fig,
-        height_ratios=[1.1, 1, 1.2],
-        hspace=0.52, wspace=0.32,
-    )
+        for ax in [ax1, ax2, ax3, ax4]:
+            ax.set_facecolor(PANEL_BG)
+            ax.tick_params(colors=MUTED, labelsize=9)
+            ax.tick_params(which="minor", colors=MUTED, labelsize=0)
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#333333")
 
-    ax1 = fig.add_subplot(gs[0, :])
-    ax2 = fig.add_subplot(gs[1, 0])
-    ax3 = fig.add_subplot(gs[1, 1])
-    ax4 = fig.add_subplot(gs[2, :])
+        S0     = params["last_price"]
+        days_x = np.arange(days + 1)
+        name   = info.get("longName", ticker.upper())
 
-    for ax in [ax1, ax2, ax3, ax4]:
-        ax.set_facecolor(PANEL_BG)
-        ax.tick_params(colors=MUTED, labelsize=9)
-        ax.tick_params(which="minor", colors=MUTED, labelsize=0)
-        for spine in ax.spines.values():
-            spine.set_edgecolor("#333333")
+        # Panel 1 — all paths
+        sample = min(n_sims, 120)
+        idx    = np.random.choice(n_sims, sample, replace=False)
+        for i in idx:
+            ax1.plot(days_x, paths[i], color="#ffffff", alpha=0.04, linewidth=0.6)
+        ax1.fill_between(days_x, pcts["p5"],  pcts["p95"], color=BLUE, alpha=0.12, label="5-95th %ile band")
+        ax1.fill_between(days_x, pcts["p25"], pcts["p75"], color=BLUE, alpha=0.20, label="25-75th %ile band")
+        ax1.plot(days_x, pcts["p95"], color=GREEN, linewidth=1.2, linestyle="--", label="95th percentile")
+        ax1.plot(days_x, pcts["p50"], color=BLUE,  linewidth=2.0,                 label="Median")
+        ax1.plot(days_x, pcts["p5"],  color=RED,   linewidth=1.2, linestyle="--", label="5th percentile")
+        ax1.axhline(S0, color=AMBER, linewidth=1.0, linestyle=":", label=f"Starting price  ${S0:.2f}")
+        apply_grid(ax1)
+        ax1.set_title(
+            f"{name} ({ticker.upper()}) — {n_sims:,} paths, {days} trading days forward\n"
+            f"Historical window: {start}  →  {end}  ({params['num_hist_days']} trading days)  |  "
+            f"EWMA vol: {params['ann_vol_ewma']:.1%}  |  "
+            f"Recent drift: {params['ann_drift_recent']:+.1%}",
+            color=TEXT, fontsize=10, pad=10,
+        )
+        ax1.set_xlabel("Trading days forward", color=MUTED, fontsize=9)
+        ax1.set_ylabel("Simulated price (USD)", color=MUTED, fontsize=9)
+        ax1.legend(loc="upper left", fontsize=8, framealpha=0.3,
+                   labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
 
-    S0     = params["last_price"]
-    days_x = np.arange(days + 1)
-    name   = info.get("longName", ticker.upper())
+        # Panel 2 — final price histogram
+        final = paths[:, -1]
+        ax2.hist(final, bins=50, color=BLUE, alpha=0.7, edgecolor=PANEL_BG, linewidth=0.3)
+        ax2.axvline(np.percentile(final,  5), color=RED,   linestyle="--", linewidth=1.2, label="5th %ile")
+        ax2.axvline(np.percentile(final, 50), color=BLUE,  linestyle="-",  linewidth=1.8, label="Median")
+        ax2.axvline(np.percentile(final, 95), color=GREEN, linestyle="--", linewidth=1.2, label="95th %ile")
+        ax2.axvline(S0, color=AMBER, linestyle=":", linewidth=1.2, label="Starting price")
+        apply_grid(ax2)
+        ax2.set_title(f"Final price distribution (day {days})", color=TEXT, fontsize=10, pad=8)
+        ax2.set_xlabel("Price (USD)", color=MUTED, fontsize=9)
+        ax2.set_ylabel("Number of simulations", color=MUTED, fontsize=9)
+        ax2.legend(fontsize=8, framealpha=0.3, labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
 
-    # Panel 1: all paths
-    sample = min(n_sims, 120)
-    idx    = np.random.choice(n_sims, sample, replace=False)
-    for i in idx:
-        ax1.plot(days_x, paths[i], color="#ffffff", alpha=0.04, linewidth=0.6)
-    ax1.fill_between(days_x, pcts["p5"],  pcts["p95"], color=BLUE, alpha=0.12, label="5-95th %ile band")
-    ax1.fill_between(days_x, pcts["p25"], pcts["p75"], color=BLUE, alpha=0.20, label="25-75th %ile band")
-    ax1.plot(days_x, pcts["p95"], color=GREEN, linewidth=1.2, linestyle="--", label="95th percentile")
-    ax1.plot(days_x, pcts["p50"], color=BLUE,  linewidth=2.0,                 label="Median")
-    ax1.plot(days_x, pcts["p5"],  color=RED,   linewidth=1.2, linestyle="--", label="5th percentile")
-    ax1.axhline(S0, color=AMBER, linewidth=1.0, linestyle=":", label=f"Starting price  ${S0:.2f}")
-    apply_grid(ax1)
-    ax1.set_title(
-        f"{name} ({ticker.upper()}) — {n_sims:,} paths, {days} trading days forward\n"
-        f"Historical window: {start}  →  {end}  ({params['num_hist_days']} trading days)  |  "
-        f"EWMA vol: {params['ann_vol_ewma']:.1%}  |  "
-        f"Recent drift: {params['ann_drift_recent']:+.1%}",
-        color=TEXT, fontsize=10, pad=10,
-    )
-    ax1.set_xlabel("Trading days forward", color=MUTED, fontsize=9)
-    ax1.set_ylabel("Simulated price (USD)", color=MUTED, fontsize=9)
-    ax1.legend(loc="upper left", fontsize=8, framealpha=0.3,
-               labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
+        # Panel 3 — historical log-returns
+        rets   = params["log_returns"] * 100
+        mean_r = rets.mean()
+        std_r  = rets.std()
+        ax3.hist(rets, bins=50, color=AMBER, alpha=0.7, edgecolor=PANEL_BG, linewidth=0.3)
+        ax3.axvline(0,              color=MUTED, linewidth=0.8, linestyle="--")
+        ax3.axvline(mean_r,         color=GREEN, linewidth=1.2, linestyle="--", label=f"Mean {mean_r:+.2f}%")
+        ax3.axvline(mean_r - std_r, color=RED,   linewidth=1.0, linestyle=":",  label=f"±1 sigma  {std_r:.2f}%")
+        ax3.axvline(mean_r + std_r, color=RED,   linewidth=1.0, linestyle=":")
+        apply_grid(ax3)
+        ax3.set_title(f"Historical daily log-returns\n{start}  →  {end}", color=TEXT, fontsize=10, pad=8)
+        ax3.set_xlabel("Daily return (%)", color=MUTED, fontsize=9)
+        ax3.set_ylabel("Frequency", color=MUTED, fontsize=9)
+        ax3.legend(fontsize=8, framealpha=0.3, labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
 
-    # Panel 2: final price histogram
-    final = paths[:, -1]
-    ax2.hist(final, bins=50, color=BLUE, alpha=0.7, edgecolor=PANEL_BG, linewidth=0.3)
-    ax2.axvline(np.percentile(final,  5), color=RED,   linestyle="--", linewidth=1.2, label="5th %ile")
-    ax2.axvline(np.percentile(final, 50), color=BLUE,  linestyle="-",  linewidth=1.8, label="Median")
-    ax2.axvline(np.percentile(final, 95), color=GREEN, linestyle="--", linewidth=1.2, label="95th %ile")
-    ax2.axvline(S0, color=AMBER, linestyle=":", linewidth=1.2, label="Starting price")
-    apply_grid(ax2)
-    ax2.set_title(f"Final price distribution (day {days})", color=TEXT, fontsize=10, pad=8)
-    ax2.set_xlabel("Price (USD)", color=MUTED, fontsize=9)
-    ax2.set_ylabel("Number of simulations", color=MUTED, fontsize=9)
-    ax2.legend(fontsize=8, framealpha=0.3, labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
+        # Panel 4 — history + most-likely forecast
+        hist_dates     = [(d.date() if hasattr(d, "date") else d) for d in closes.index]
+        forecast_dates = add_trading_days(hist_dates[-1], days)
+        median_path        = find_median_path(paths, pcts)
+        forecast_end_price = median_path[-1]
+        pct_change         = (forecast_end_price / S0 - 1) * 100
 
-    # Panel 3: historical log-returns
-    rets   = params["log_returns"] * 100
-    mean_r = rets.mean()
-    std_r  = rets.std()
-    ax3.hist(rets, bins=50, color=AMBER, alpha=0.7, edgecolor=PANEL_BG, linewidth=0.3)
-    ax3.axvline(0,              color=MUTED, linewidth=0.8, linestyle="--")
-    ax3.axvline(mean_r,         color=GREEN, linewidth=1.2, linestyle="--", label=f"Mean {mean_r:+.2f}%")
-    ax3.axvline(mean_r - std_r, color=RED,   linewidth=1.0, linestyle=":",  label=f"±1 sigma  {std_r:.2f}%")
-    ax3.axvline(mean_r + std_r, color=RED,   linewidth=1.0, linestyle=":")
-    apply_grid(ax3)
-    ax3.set_title(
-        f"Historical daily log-returns\n{start}  →  {end}",
-        color=TEXT, fontsize=10, pad=8,
-    )
-    ax3.set_xlabel("Daily return (%)", color=MUTED, fontsize=9)
-    ax3.set_ylabel("Frequency", color=MUTED, fontsize=9)
-    ax3.legend(fontsize=8, framealpha=0.3, labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
+        def to_mpl(d):
+            if isinstance(d, datetime):
+                return mdates.date2num(d)
+            return mdates.date2num(datetime(d.year, d.month, d.day))
 
-    # Panel 4: history + most-likely forecast
-    hist_dates     = [(d.date() if hasattr(d, "date") else d) for d in closes.index]
-    forecast_dates = add_trading_days(hist_dates[-1], days)
-    median_path        = find_median_path(paths, pcts)
-    forecast_end_price = median_path[-1]
-    pct_change         = (forecast_end_price / S0 - 1) * 100
+        hist_x     = [to_mpl(d) for d in hist_dates]
+        forecast_x = [to_mpl(d) for d in forecast_dates]
+        bridge_x   = [hist_x[-1]] + forecast_x
+        bridge_y   = median_path
+        conf_low   = np.concatenate([[S0], pcts["p5"][1:]])
+        conf_high  = np.concatenate([[S0], pcts["p95"][1:]])
 
-    def to_mpl(d):
-        if isinstance(d, datetime):
-            return mdates.date2num(d)
-        return mdates.date2num(datetime(d.year, d.month, d.day))
+        ax4.plot(hist_x, closes.values, color=HIST_COL, linewidth=1.8, label="History", zorder=3)
+        ax4.plot(bridge_x, bridge_y, color=FORE_COL, linewidth=1.8,
+                 label=f"Most-likely forecast ({days}d)", zorder=3)
+        ax4.fill_between(bridge_x, conf_low, conf_high,
+                         color=FORE_COL, alpha=0.12, label="5-95th %ile band")
+        divider_x = hist_x[-1]
+        ax4.axvline(divider_x, color=MUTED, linewidth=1.0, linestyle="--", zorder=4)
+        ax4.xaxis_date()
+        ax4.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
+        ax4.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+        for label in ax4.get_xticklabels():
+            label.set_rotation(30)
+            label.set_ha("right")
+        apply_grid(ax4, date_axis=True)
 
-    hist_x     = [to_mpl(d) for d in hist_dates]
-    forecast_x = [to_mpl(d) for d in forecast_dates]
-    bridge_x   = [hist_x[-1]] + forecast_x
-    bridge_y   = median_path
-    conf_low   = np.concatenate([[S0], pcts["p5"][1:]])
-    conf_high  = np.concatenate([[S0], pcts["p95"][1:]])
+        all_y = list(closes.values) + list(median_path) + list(conf_low) + list(conf_high)
+        y_min = min(all_y) * 0.97
+        y_max = max(all_y) * 1.03
+        ax4.set_ylim(y_min, y_max)
 
-    ax4.plot(hist_x, closes.values, color=HIST_COL, linewidth=1.8, label="History", zorder=3)
-    ax4.plot(bridge_x, bridge_y, color=FORE_COL, linewidth=1.8,
-             label=f"Most-likely forecast ({days}d)", zorder=3)
-    ax4.fill_between(bridge_x, conf_low, conf_high,
-                     color=FORE_COL, alpha=0.12, label="5-95th %ile band")
-    divider_x = hist_x[-1]
-    ax4.axvline(divider_x, color=MUTED, linewidth=1.0, linestyle="--", zorder=4)
-    ax4.xaxis_date()
-    ax4.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
-    ax4.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
-    for label in ax4.get_xticklabels():
-        label.set_rotation(30)
-        label.set_ha("right")
-    apply_grid(ax4, date_axis=True)
+        ax4.text(
+            divider_x + (forecast_x[-1] - hist_x[-1]) * 0.01,
+            y_max * 0.98, "  Forecast start",
+            color=MUTED, fontsize=8, va="top", zorder=5,
+        )
+        ax4.annotate(
+            f"  ${S0:.2f}",
+            xy=(hist_x[-1], S0), xytext=(6, 0), textcoords="offset points",
+            color=TEXT, fontsize=8, va="center", zorder=5,
+        )
+        ax4.annotate(
+            f"${forecast_end_price:.2f}  ({pct_change:+.1f}%)",
+            xy=(forecast_x[-1], forecast_end_price),
+            xytext=(-88, 10), textcoords="offset points",
+            color=FORE_COL, fontsize=8, fontweight="bold", zorder=5,
+            arrowprops=dict(arrowstyle="-", color=FORE_COL, lw=0.8),
+        )
+        ax4.set_title(
+            f"{name} ({ticker.upper()}) — History & Most-Likely Forecast\n"
+            f"History: {hist_dates[0]} → {hist_dates[-1]}  |  "
+            f"Forecast: {forecast_dates[0]} → {forecast_dates[-1]}  ({days} trading days)",
+            color=TEXT, fontsize=10, pad=10,
+        )
+        ax4.set_xlabel("Date", color=MUTED, fontsize=9)
+        ax4.set_ylabel("Price (USD)", color=MUTED, fontsize=9)
+        ax4.legend(loc="upper left", fontsize=8, framealpha=0.3,
+                   labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
 
-    all_y = list(closes.values) + list(median_path) + list(conf_low) + list(conf_high)
-    y_min = min(all_y) * 0.97
-    y_max = max(all_y) * 1.03
-    ax4.set_ylim(y_min, y_max)
+        plt.suptitle(
+            f"Monte Carlo Simulation — {ticker.upper()}  |  "
+            f"EWMA vol: {params['ann_vol_scaled']:.1%} ann.  |  "
+            f"Recent drift: {params['ann_drift_recent']:+.1%} ann.  |  "
+            f"Data: {start} → {end}",
+            color=TEXT, fontsize=11, y=0.99,
+        )
+        return fig
 
-    ax4.text(
-        divider_x + (forecast_x[-1] - hist_x[-1]) * 0.01,
-        y_max * 0.98, "  Forecast start",
-        color=MUTED, fontsize=8, va="top", zorder=5,
-    )
-    ax4.annotate(
-        f"  ${S0:.2f}",
-        xy=(hist_x[-1], S0), xytext=(6, 0), textcoords="offset points",
-        color=TEXT, fontsize=8, va="center", zorder=5,
-    )
-    ax4.annotate(
-        f"${forecast_end_price:.2f}  ({pct_change:+.1f}%)",
-        xy=(forecast_x[-1], forecast_end_price),
-        xytext=(-88, 10), textcoords="offset points",
-        color=FORE_COL, fontsize=8, fontweight="bold", zorder=5,
-        arrowprops=dict(arrowstyle="-", color=FORE_COL, lw=0.8),
-    )
-    ax4.set_title(
-        f"{name} ({ticker.upper()}) — History & Most-Likely Forecast\n"
-        f"History: {hist_dates[0]} → {hist_dates[-1]}  |  "
-        f"Forecast: {forecast_dates[0]} → {forecast_dates[-1]}  ({days} trading days)",
-        color=TEXT, fontsize=10, pad=10,
-    )
-    ax4.set_xlabel("Date", color=MUTED, fontsize=9)
-    ax4.set_ylabel("Price (USD)", color=MUTED, fontsize=9)
-    ax4.legend(loc="upper left", fontsize=8, framealpha=0.3,
-               labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
+    # ── Main app body ─────────────────────────────────────────────────────────
 
-    plt.suptitle(
-        f"Monte Carlo Simulation — {ticker.upper()}  |  "
-        f"EWMA vol: {params['ann_vol_scaled']:.1%} ann.  |  "
-        f"Recent drift: {params['ann_drift_recent']:+.1%} ann.  |  "
-        f"Data: {start} → {end}",
-        color=TEXT, fontsize=11, y=0.99,
-    )
+    if run_btn:
+        if start_date >= end_date:
+            st.error("Start date must be before end date.")
+        elif (end_date - start_date).days < 30:
+            st.error("Date range must span at least 30 calendar days.")
+        else:
+            try:
+                closes, info = fetch_data(ticker, start_date, end_date)
+                params = compute_parameters(
+                    closes,
+                    drift_override=drift_override,
+                    vol_scale=vol_scale,
+                    ewma_lambda=ewma_lambda,
+                    drift_window=drift_window,
+                )
 
-    return fig
+                with st.spinner("Running simulations…"):
+                    paths = run_simulation(params, days_forward, num_simulations, t_dof)
 
+                pcts = compute_percentiles(paths)
+                S0   = params["last_price"]
 
-# ── Main app body ─────────────────────────────────────────────────────────────
+                show_summary(ticker, params, paths, days_forward,
+                             start_date, end_date, ewma_lambda, t_dof)
 
-if run_btn:
-    if start_date >= end_date:
-        st.error("Start date must be before end date.")
-    elif (end_date - start_date).days < 30:
-        st.error("Date range must span at least 30 calendar days.")
+                st.divider()
+                show_risk_metrics(paths, S0, days_forward, ticker)
+
+                st.divider()
+                st.subheader("📉 Charts")
+                fig = build_figure(
+                    ticker, closes, params, paths, pcts,
+                    days_forward, num_simulations, info,
+                    start_date, end_date,
+                )
+                st.pyplot(fig, use_container_width=True)
+
+                st.divider()
+                show_downloads(
+                    fig, paths, pcts, S0, ticker, days_forward,
+                    start_date, end_date, params, ewma_lambda, t_dof, preset_name,
+                )
+                plt.close(fig)
+
+            except ValueError as e:
+                st.error(str(e))
+            except Exception as e:
+                st.error(f"Unexpected error: {e}")
+
     else:
-        try:
-            closes, info = fetch_data(ticker, start_date, end_date)
-            params = compute_parameters(
-                closes,
-                drift_override=drift_override,
-                vol_scale=vol_scale,
-                ewma_lambda=ewma_lambda,
-                drift_window=drift_window,
-            )
+        st.info("👈 Configure your parameters in the sidebar, then click **▶ Run Simulation**.")
 
-            with st.spinner("Running simulations…"):
-                paths = run_simulation(params, days_forward, num_simulations, t_dof)
 
-            pcts = compute_percentiles(paths)
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — ABOUT & METHODOLOGY
+# ═══════════════════════════════════════════════════════════════════════════════
 
-            show_summary(ticker, params, paths, days_forward, start_date, end_date, ewma_lambda, t_dof)
+with tab_about:
 
-            st.subheader("📉 Charts")
-            fig = build_figure(
-                ticker, closes, params, paths, pcts,
-                days_forward, num_simulations, info,
-                start_date, end_date,
-            )
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+    st.title("📖 About & Methodology")
 
-        except ValueError as e:
-            st.error(str(e))
-        except Exception as e:
-            st.error(f"Unexpected error: {e}")
+    st.markdown("""
+This tool simulates future stock price paths using a **Monte Carlo method** built on
+**Geometric Brownian Motion (GBM)** — the same mathematical foundation used in the
+Black-Scholes options pricing model and quantitative risk management.
 
-else:
-    st.info("👈 Configure your parameters in the sidebar, then click **▶ Run Simulation**.")
+---
+
+## How it works — step by step
+
+### 1. Fetch historical data
+Daily adjusted closing prices are downloaded from Yahoo Finance via `yfinance`.
+The date range you choose determines how much history is used to calibrate the model.
+
+### 2. Compute log returns
+Daily log returns are calculated as:
+
+> **r_t = ln(P_t / P_{t-1})**
+
+Log returns are preferred over simple returns because they are additive across time
+and more closely approximate a normal distribution — a core assumption of GBM.
+
+### 3. Estimate volatility — EWMA
+Rather than treating all historical returns equally, this model uses
+**Exponentially Weighted Moving Average (EWMA)** volatility:
+
+> **σ²_t = λ · σ²_{t-1} + (1 − λ) · r²_t**
+
+The decay factor **λ** controls how quickly older observations lose influence.
+The industry standard (JP Morgan RiskMetrics) is **λ = 0.94**.
+A lower λ makes the model react faster to recent volatility spikes; a higher λ
+smooths out short-term noise.
+
+### 4. Estimate drift — recent window
+The expected daily drift **μ** is estimated from the mean of log returns over a
+recent window (default: last 63 trading days ≈ 3 months), rather than the full
+historical period. This makes the model sensitive to current momentum rather than
+anchoring to where the stock was years ago. You can override drift manually if you
+have a specific return assumption.
+
+### 5. Simulate price paths — GBM with fat tails
+Each simulation path is generated day-by-day using the GBM formula:
+
+> **S_{t+1} = S_t · exp( (μ − ½σ²) + σ · Z_t )**
+
+where **Z_t** is a random shock. Crucially, instead of drawing Z from a standard
+normal distribution, this model draws from a **Student's t-distribution** with
+user-configurable degrees of freedom (default: 5). The t-distribution has heavier
+tails than the normal — meaning extreme daily moves (crashes, short squeezes) occur
+more often, as they do in real markets. The draws are rescaled so the distribution
+still has unit variance, preserving the meaning of σ.
+
+### 6. Aggregate results
+After running all simulations, the model computes:
+- **Percentile bands** (5th, 25th, 50th, 75th, 95th) across all paths at every time step
+- A **"most-likely" path** — the single simulated path whose final price is closest to the median
+- **VaR and CVaR** from the distribution of final prices
+
+---
+
+## Risk metrics explained
+
+| Metric | What it answers |
+|---|---|
+| **VaR (Value at Risk)** | "What is the worst loss I should expect NOT to exceed, X% of the time?" |
+| **CVaR / Expected Shortfall** | "If I end up in the worst X% of outcomes, what is my average loss?" |
+
+CVaR is considered a more complete risk measure than VaR because it captures the
+*severity* of tail events, not just their threshold. A stock with VaR 95% = $5 and
+CVaR 95% = $20 has a much heavier tail than one where both figures are similar.
+
+---
+
+## Preset configurations
+
+| Preset | Best for | Key settings |
+|---|---|---|
+| **Conservative** | Large-cap, low-beta stocks (JNJ, KO, BRK) | Low vol scale, slow EWMA decay, near-normal tails, long drift window |
+| **Balanced** | Most equities — a solid default | RiskMetrics λ=0.94, t-dof=5, 63-day drift window |
+| **Aggressive** | High-beta / speculative names (TSLA, MSTR) | 1.5× vol, fast EWMA decay, very fat tails (dof=3) |
+| **Momentum** | Stocks in a strong near-term trend | Standard vol, 21-day drift window to capture recent move |
+
+---
+
+## Limitations & important disclaimers
+
+- **GBM assumes constant volatility and drift.** Real markets exhibit volatility
+  clustering, mean reversion, jumps, and regime changes that this model does not
+  fully capture.
+- **Past price behaviour does not guarantee future results.** The model is calibrated
+  entirely on historical data. A stock that trended strongly upward for a year may
+  not continue to do so.
+- **The "most-likely forecast" line is the median of a distribution, not a prediction.**
+  By construction, roughly half of all simulated paths end above it and half below.
+- **VaR and CVaR are model-derived estimates.** They depend on the model's assumptions
+  and the historical window chosen. They are not guarantees.
+- This tool is intended for **educational and analytical purposes only** and does not
+  constitute financial advice. Always consult a qualified financial professional before
+  making investment decisions.
+
+---
+
+## Technology
+
+Built with **Python**, **Streamlit**, **yfinance**, **NumPy**, **SciPy**, and **Matplotlib**.
+""")
