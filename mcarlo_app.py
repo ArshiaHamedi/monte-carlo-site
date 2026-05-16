@@ -644,19 +644,22 @@ Keep the total response under 420 words. Do not use bullet points — write in f
 
     def show_downloads(figs, paths, pcts, S0, ticker, days,
                        start, end, params, ewma_lambda, t_dof, preset_name):
-        """figs: dict of {label: plotly figure} for PNG export."""
+        """figs: dict of {label: plotly figure} for export."""
         st.subheader("💾 Download Results")
 
-        # Build a combined PNG from all four charts stacked
         col1, col2 = st.columns(2)
         with col1:
-            # Export the main simulation fan chart as PNG
-            png_bytes = figs["fan"].to_image(format="png", width=1400, height=600, scale=2)
+            # Export fan chart as self-contained interactive HTML (no Chrome needed)
+            html_bytes = figs["fan"].to_html(
+                include_plotlyjs="cdn",
+                full_html=True,
+                config={"scrollZoom": True, "displayModeBar": True},
+            ).encode("utf-8")
             st.download_button(
-                label="⬇️ Download simulation chart (PNG)",
-                data=png_bytes,
-                file_name=f"{ticker}_montecarlo_{date.today()}.png",
-                mime="image/png",
+                label="⬇️ Download simulation chart (HTML)",
+                data=html_bytes,
+                file_name=f"{ticker}_montecarlo_{date.today()}.html",
+                mime="text/html",
                 use_container_width=True,
             )
         with col2:
@@ -668,6 +671,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                 mime="text/csv",
                 use_container_width=True,
             )
+
 
     # ── Simulation summary ────────────────────────────────────────────────────
 
