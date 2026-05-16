@@ -716,7 +716,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
     def build_fan_chart(ticker, closes, params, paths, pcts, days, n_sims, info, start, end):
         """Panel 1 — simulation fan: all paths + percentile bands."""
         S0     = params["last_price"]
-        days_x = list(range(days + 1))
+        days_x = [int(i) for i in range(days + 1)]
         name   = info.get("longName", ticker.upper())
 
         fig = go.Figure()
@@ -734,8 +734,10 @@ Keep the total response under 420 words. Do not use bullet points — write in f
             ))
 
         # 5–95 band
+        days_fwd = list(days_x)
+        days_rev = list(days_x[::-1])
         fig.add_trace(go.Scatter(
-            x=days_x + days_x[::-1],
+            x=days_fwd + days_rev,
             y=list(pcts["p95"]) + list(pcts["p5"][::-1]),
             fill="toself",
             fillcolor="rgba(55,138,221,0.12)",
@@ -746,7 +748,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
 
         # 25–75 band
         fig.add_trace(go.Scatter(
-            x=days_x + days_x[::-1],
+            x=days_fwd + days_rev,
             y=list(pcts["p75"]) + list(pcts["p25"][::-1]),
             fill="toself",
             fillcolor="rgba(55,138,221,0.22)",
