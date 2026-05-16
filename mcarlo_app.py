@@ -275,6 +275,28 @@ with tab_sim:
             pass
         return closes, info
 
+    @st.cache_data(show_spinner=False)
+    def fetch_actual_data(ticker: str, from_date: date):
+        """Fetch actual price data from the simulation end date to today (for the red line)."""
+        try:
+            end_inclusive = date.today() + timedelta(days=1)
+            df = yf.download(
+                ticker,
+                start=str(from_date),
+                end=str(end_inclusive),
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+            )
+            if df.empty:
+                return None
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+            closes = df["Close"].dropna()
+            return closes if len(closes) > 1 else None
+        except Exception:
+            return None
+
     def compute_ewma_vol(log_returns: pd.Series, lam: float) -> float:
         squared  = log_returns.values ** 2
         ewma_var = squared[0]
@@ -800,8 +822,9 @@ Keep the total response under 420 words. Do not use bullet points — write in f
         )
         return fig
 
-    def build_forecast_chart(ticker, closes, params, paths, pcts, days, info, start, end):
-        """Panel 2 — history stitched to most-likely forecast with date x-axis."""
+    def build_forecast_chart(ticker, closes, params, paths, pcts, days, info, start, end, actual_closes=None):
+        """Panel 2 — history stitched to most-likely forecast with date x-axis.
+        actual_closes: optional Series of real prices after the simulation end date (red line)."""
         S0             = params["last_price"]
         name           = info.get("longName", ticker.upper())
         hist_dates     = [d.date() if hasattr(d, "date") else d for d in closes.index]
@@ -850,6 +873,30 @@ Keep the total response under 420 words. Do not use bullet points — write in f
             name=f"Most-likely forecast ({days}d)",
             hovertemplate="%{x}<br>Forecast: $%{y:.2f}<extra></extra>",
         ))
+
+        # Actual price after simulation end date (red line)
+        if actual_closes is not None and len(actual_closes) > 1:
+            actual_dates = [d.date() if hasattr(d, "date") else d for d in actual_closes.index]
+            actual_last  = actual_closes.iloc[-1]
+            actual_pct   = (actual_last / S0 - 1) * 100
+            fig.add_trace(go.Scatter(
+                x=[str(d) for d in actual_dates],
+                y=actual_closes.values,
+                mode="lines",
+                line=dict(color="#E03C3C", width=2),
+                name="Actual price (post-simulation)",
+                hovertemplate="%{x}<br>Actual: $%{y:.2f}<extra></extra>",
+            ))
+            # Annotation at actual price endpoint
+            fig.add_annotation(
+                x=str(actual_dates[-1]), y=float(actual_last),
+                text=f"Actual ${actual_last:.2f} ({actual_pct:+.1f}%)",
+                showarrow=True, arrowhead=2,
+                arrowcolor="#E03C3C",
+                font=dict(color="#E03C3C", size=11, family="monospace"),
+                bgcolor=THEME["panel"], bordercolor="#E03C3C",
+                xanchor="right",
+            )
 
         # Vertical divider at forecast start — use shape instead of vline for date axes
         fig.add_shape(
@@ -1021,9 +1068,11 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                 st.plotly_chart(fig_fan, use_container_width=True)
 
                 # ── Chart 2: History + forecast (date axis)
+                actual_closes = fetch_actual_data(ticker, end_date)
                 fig_forecast = build_forecast_chart(
                     ticker, closes, params, paths, pcts,
                     days_forward, info, start_date, end_date,
+                    actual_closes=actual_closes,
                 )
                 st.plotly_chart(fig_forecast, use_container_width=True)
 
