@@ -848,12 +848,21 @@ Keep the total response under 420 words. Do not use bullet points — write in f
             hovertemplate="%{x}<br>Forecast: $%{y:.2f}<extra></extra>",
         ))
 
-        # Vertical divider at forecast start
-        fig.add_vline(
-            x=str(hist_dates[-1]),
+        # Vertical divider at forecast start — use shape instead of vline for date axes
+        fig.add_shape(
+            type="line",
+            x0=str(hist_dates[-1]), x1=str(hist_dates[-1]),
+            y0=0, y1=1,
+            xref="x", yref="paper",
             line=dict(color=THEME["muted"], width=1.2, dash="dash"),
-            annotation_text="Forecast start",
-            annotation_font_color=THEME["muted"],
+        )
+        fig.add_annotation(
+            x=str(hist_dates[-1]), y=1,
+            xref="x", yref="paper",
+            text="Forecast start",
+            showarrow=False,
+            font=dict(color=THEME["muted"], size=10),
+            yanchor="bottom",
         )
 
         # Annotation at forecast end
@@ -875,6 +884,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                 height=480,
             ),
             dragmode="zoom",
+            hovermode="x",
         )
         return fig
 
