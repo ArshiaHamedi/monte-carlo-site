@@ -80,7 +80,6 @@ def base_layout(title="", xaxis=None, yaxis=None, height=420):
             gridcolor     = THEME["grid"],
             zerolinecolor = THEME["grid"],
             tickfont      = dict(color=THEME["muted"]),
-            tickprefix    = "$",
             **(yaxis or {}),
         ),
     )
@@ -790,7 +789,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                 title=f"{name} ({ticker}) — {n_sims:,} simulations · {days} trading days forward  |  "
                       f"EWMA vol {params['ann_vol_ewma']:.1%}  ·  Recent drift {params['ann_drift_recent']:+.1%}",
                 xaxis=dict(title="Trading days forward"),
-                yaxis=dict(title="Simulated price (USD)"),
+                yaxis=dict(title="Simulated price (USD)", tickprefix="$"),
                 height=480,
             ),
             dragmode="zoom",
@@ -880,12 +879,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                 title=f"{name} ({ticker}) — History & Most-Likely Forecast  |  "
                       f"{hist_dates[0]} → {forecast_dates[-1]}",
                 xaxis=dict(title="Date", type="date"),
-                yaxis=dict(title="Price (USD)"),
-                height=480,
-            ),
-            dragmode="zoom",
-        )
-        # Override hovermode after layout is set — date axis needs "x" not "x unified"
+                yaxis=dict(title="Price (USD)", tickprefix="$"),
         fig.update_layout(hovermode="x")
         return fig
 
@@ -925,7 +919,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
             **base_layout(
                 title=f"Final price distribution — day {days}",
                 xaxis=dict(title="Price (USD)", tickprefix="$"),
-                yaxis=dict(title="Number of simulations", tickprefix=""),
+                yaxis=dict(title="Number of simulations"),
                 height=400,
             )
         )
@@ -964,8 +958,8 @@ Keep the total response under 420 words. Do not use bullet points — write in f
         fig.update_layout(
             **base_layout(
                 title=f"Historical daily log-returns  |  {start} → {end}",
-                xaxis=dict(title="Daily return (%)", ticksuffix="%", tickprefix=""),
-                yaxis=dict(title="Frequency", tickprefix=""),
+                xaxis=dict(title="Daily return (%)", ticksuffix="%"),
+                yaxis=dict(title="Frequency"),
                 height=400,
             )
         )
