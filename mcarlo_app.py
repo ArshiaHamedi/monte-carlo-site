@@ -884,8 +884,9 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                 height=480,
             ),
             dragmode="zoom",
-            hovermode="x",
         )
+        # Override hovermode after layout is set — date axis needs "x" not "x unified"
+        fig.update_layout(hovermode="x")
         return fig
 
     def build_histogram_chart(ticker, paths, pcts, S0, days):
