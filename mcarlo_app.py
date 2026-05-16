@@ -5,6 +5,14 @@ all data derived from yfinance and cached for performance
 run with:
     streamlit run mcarlo_app.py
 
+features:
+  - preset configurations (Conservative / Balanced / Aggressive / Momentum)
+  - interactive Plotly charts (zoom, pan, hover crosshair)
+  - downloadable chart (PNG via Plotly) and results (CSV)
+  - VaR & CVaR risk metrics panel
+  - AI-powered plain-English summary via Groq (Llama 3.3 70B)
+  - about / methodology page
+  - EWMA volatility, Student-t fat tails, recent-window drift, no fixed seed
 """
 
 import warnings
@@ -804,9 +812,11 @@ Keep the total response under 420 words. Do not use bullet points — write in f
         fig = go.Figure()
 
         # 5–95 confidence band (forecast only)
+        band_x = [str(d) for d in bridge_dates] + [str(d) for d in bridge_dates[::-1]]
+        band_y = list(conf_high) + list(conf_low[::-1])
         fig.add_trace(go.Scatter(
-            x=bridge_dates + bridge_dates[::-1],
-            y=list(conf_high) + list(conf_low[::-1]),
+            x=band_x,
+            y=band_y,
             fill="toself",
             fillcolor="rgba(76,175,120,0.12)",
             line=dict(color="rgba(0,0,0,0)"),
@@ -814,9 +824,13 @@ Keep the total response under 420 words. Do not use bullet points — write in f
             hoverinfo="skip",
         ))
 
+        hist_dates_str     = [str(d) for d in hist_dates]
+        bridge_dates_str   = [str(d) for d in bridge_dates]
+        forecast_dates_str = [str(d) for d in forecast_dates]
+
         # Historical price
         fig.add_trace(go.Scatter(
-            x=hist_dates, y=closes.values,
+            x=hist_dates_str, y=closes.values,
             mode="lines",
             line=dict(color=THEME["hist_col"], width=2),
             name="History",
@@ -825,7 +839,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
 
         # Most-likely forecast
         fig.add_trace(go.Scatter(
-            x=bridge_dates, y=median_path,
+            x=bridge_dates_str, y=median_path,
             mode="lines",
             line=dict(color=THEME["fore_col"], width=2),
             name=f"Most-likely forecast ({days}d)",
