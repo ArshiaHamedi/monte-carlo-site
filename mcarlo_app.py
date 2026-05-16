@@ -880,6 +880,10 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                       f"{hist_dates[0]} → {forecast_dates[-1]}",
                 xaxis=dict(title="Date", type="date"),
                 yaxis=dict(title="Price (USD)", tickprefix="$"),
+                height=480,
+            ),
+            dragmode="zoom",
+        )
         fig.update_layout(hovermode="x")
         return fig
 
