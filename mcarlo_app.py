@@ -877,8 +877,6 @@ Keep the total response under 420 words. Do not use bullet points — write in f
         # Actual price after simulation end date (red line)
         if actual_closes is not None and len(actual_closes) > 1:
             actual_dates = [d.date() if hasattr(d, "date") else d for d in actual_closes.index]
-            actual_last  = actual_closes.iloc[-1]
-            actual_pct   = (actual_last / S0 - 1) * 100
             fig.add_trace(go.Scatter(
                 x=[str(d) for d in actual_dates],
                 y=actual_closes.values,
@@ -887,16 +885,6 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                 name="Actual price (post-simulation)",
                 hovertemplate="%{x}<br>Actual: $%{y:.2f}<extra></extra>",
             ))
-            # Annotation at actual price endpoint
-            fig.add_annotation(
-                x=str(actual_dates[-1]), y=float(actual_last),
-                text=f"Actual ${actual_last:.2f} ({actual_pct:+.1f}%)",
-                showarrow=True, arrowhead=2,
-                arrowcolor="#E03C3C",
-                font=dict(color="#E03C3C", size=11, family="monospace"),
-                bgcolor=THEME["panel"], bordercolor="#E03C3C",
-                xanchor="right",
-            )
 
         # Vertical divider at forecast start — use shape instead of vline for date axes
         fig.add_shape(
@@ -913,16 +901,6 @@ Keep the total response under 420 words. Do not use bullet points — write in f
             showarrow=False,
             font=dict(color=THEME["muted"], size=10),
             yanchor="bottom",
-        )
-
-        # Annotation at forecast end
-        fig.add_annotation(
-            x=str(forecast_dates[-1]), y=end_price,
-            text=f"${end_price:.2f} ({pct_change:+.1f}%)",
-            showarrow=True, arrowhead=2,
-            arrowcolor=THEME["fore_col"],
-            font=dict(color=THEME["fore_col"], size=11, family="monospace"),
-            bgcolor=THEME["panel"], bordercolor=THEME["fore_col"],
         )
 
         fig.update_layout(
