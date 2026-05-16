@@ -4,6 +4,7 @@ monte carlo stock price simulation - streamlit app
 all data derived from yfinance and cached for performance
 run with:
     streamlit run mcarlo_app.py
+
 """
 
 import warnings
@@ -13,10 +14,8 @@ import io
 import csv
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-import matplotlib.dates as mdates
-import matplotlib.ticker as mticker
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import yfinance as yf
 import streamlit as st
 from datetime import date, datetime, timedelta
@@ -30,6 +29,54 @@ st.set_page_config(
     page_icon="📈",
     layout="wide",
 )
+
+# ── Shared Plotly theme ───────────────────────────────────────────────────────
+
+THEME = dict(
+    bg        = "#0f0f0f",
+    panel     = "#1a1a1a",
+    text      = "#e0e0e0",
+    muted     = "#777777",
+    grid      = "#2e2e2e",
+    blue      = "#378ADD",
+    green     = "#639922",
+    red       = "#D85A30",
+    amber     = "#BA7517",
+    hist_col  = "#1c3a5e",
+    fore_col  = "#4caf78",
+)
+
+def base_layout(title="", xaxis=None, yaxis=None, height=420):
+    """Return a consistent dark Plotly layout dict."""
+    layout = dict(
+        title       = dict(text=title, font=dict(color=THEME["text"], size=13)),
+        paper_bgcolor = THEME["bg"],
+        plot_bgcolor  = THEME["panel"],
+        font          = dict(color=THEME["muted"], size=11),
+        legend        = dict(
+            bgcolor     = "rgba(26,26,26,0.8)",
+            bordercolor = "#444",
+            borderwidth = 1,
+            font        = dict(color=THEME["text"], size=10),
+        ),
+        hovermode   = "x unified",
+        height      = height,
+        margin      = dict(l=60, r=30, t=60, b=50),
+        xaxis = dict(
+            gridcolor     = THEME["grid"],
+            zerolinecolor = THEME["grid"],
+            tickfont      = dict(color=THEME["muted"]),
+            **(xaxis or {}),
+        ),
+        yaxis = dict(
+            gridcolor     = THEME["grid"],
+            zerolinecolor = THEME["grid"],
+            tickfont      = dict(color=THEME["muted"]),
+            tickprefix    = "$",
+            **(yaxis or {}),
+        ),
+    )
+    return layout
 
 # ── Preset definitions ────────────────────────────────────────────────────────
 
@@ -183,19 +230,6 @@ with tab_sim:
 
     # ── Core functions ────────────────────────────────────────────────────────
 
-    def apply_grid(ax, date_axis=False):
-        GRID_MAJOR = "#2e2e2e"
-        GRID_MINOR = "#222222"
-        ax.grid(which="major", color=GRID_MAJOR, linewidth=0.7, linestyle="-",  zorder=0)
-        ax.grid(which="minor", color=GRID_MINOR, linewidth=0.4, linestyle="--", zorder=0)
-        ax.set_axisbelow(True)
-        if date_axis:
-            ax.xaxis.set_minor_locator(mdates.MonthLocator(interval=1))
-            ax.yaxis.set_minor_locator(mticker.AutoMinorLocator(4))
-        else:
-            ax.xaxis.set_minor_locator(mticker.AutoMinorLocator(4))
-            ax.yaxis.set_minor_locator(mticker.AutoMinorLocator(4))
-
     def add_trading_days(from_date: date, n_days: int) -> list:
         dates, cursor = [], from_date
         while len(dates) < n_days:
@@ -206,7 +240,6 @@ with tab_sim:
 
     @st.cache_data(show_spinner="Fetching historical data from yfinance…")
     def fetch_data(ticker: str, start: date, end: date):
-        """Cached: same ticker+range won't re-hit yfinance on every widget change."""
         end_inclusive = end + timedelta(days=1)
         df = yf.download(
             ticker,
@@ -354,7 +387,6 @@ with tab_sim:
 
     def build_ai_prompt(ticker, info, params, paths, pcts, days,
                         n_sims, preset_name, ewma_lambda, t_dof, start, end):
-        """Assemble all simulation outputs into a structured prompt for Llama 3."""
         final        = paths[:, -1]
         S0           = params["last_price"]
         p5           = float(np.percentile(final,  5))
@@ -462,18 +494,17 @@ Keep the total response under 420 words. Do not use bullet points — write in f
 
     def show_ai_summary(ticker, info, params, paths, pcts, days,
                         n_sims, preset_name, ewma_lambda, t_dof, start, end):
-        """Call Groq API and stream the AI summary into the UI."""
         st.subheader("🤖 AI Summary — Plain English Breakdown")
         st.markdown(
             "An AI-generated explanation of your simulation results, "
-            "written for everyday investors, powered by Groq."
+            "written for everyday investors."
         )
 
         groq_key = st.secrets.get("GROQ_API_KEY", "")
         if not groq_key:
             st.warning(
                 "Groq API key not configured. Add `GROQ_API_KEY` to your Streamlit secrets "
-                "to enable AI summaries. See deployment instructions for details."
+                "to enable AI summaries."
             )
             return
 
@@ -495,7 +526,7 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                                 "You explain quantitative results in plain English for retail investors. "
                                 "You never make price predictions or give investment advice. "
                                 "You always remind users that simulations are based on historical data "
-                                "and are not guarantees of future performance, nor are a financial advice."
+                                "and are not guarantees of future performance."
                             ),
                         },
                         {"role": "user", "content": prompt},
@@ -505,7 +536,6 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                     stream=True,
                 )
 
-                # Stream text into a styled container with blinking cursor
                 summary_box = st.empty()
                 full_text   = ""
                 for chunk in stream:
@@ -524,8 +554,6 @@ Keep the total response under 420 words. Do not use bullet points — write in f
                         ">{full_text}▌</div>""",
                         unsafe_allow_html=True,
                     )
-
-                # Final render — remove blinking cursor
                 summary_box.markdown(
                     f"""<div style="
                         background: #1a1a2e;
@@ -597,10 +625,8 @@ Keep the total response under 420 words. Do not use bullet points — write in f
             cvar_pct  = -pnl_pct[tail_mask].mean()      if tail_mask.any() else var_pct
             summary_rows.append([
                 f"{int(cl*100)}%",
-                f"${var_usd:.4f}",
-                f"{var_pct:.2f}%",
-                f"${cvar_usd:.4f}",
-                f"{cvar_pct:.2f}%",
+                f"${var_usd:.4f}", f"{var_pct:.2f}%",
+                f"${cvar_usd:.4f}", f"{cvar_pct:.2f}%",
             ])
 
         buf    = io.StringIO()
@@ -609,21 +635,19 @@ Keep the total response under 420 words. Do not use bullet points — write in f
             writer.writerow(row)
         return buf.getvalue().encode()
 
-    def fig_to_png(fig) -> bytes:
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
-                    facecolor=fig.get_facecolor())
-        buf.seek(0)
-        return buf.read()
-
-    def show_downloads(fig, paths, pcts, S0, ticker, days,
+    def show_downloads(figs, paths, pcts, S0, ticker, days,
                        start, end, params, ewma_lambda, t_dof, preset_name):
+        """figs: dict of {label: plotly figure} for PNG export."""
         st.subheader("💾 Download Results")
+
+        # Build a combined PNG from all four charts stacked
         col1, col2 = st.columns(2)
         with col1:
+            # Export the main simulation fan chart as PNG
+            png_bytes = figs["fan"].to_image(format="png", width=1400, height=600, scale=2)
             st.download_button(
-                label="⬇️ Download chart (PNG)",
-                data=fig_to_png(fig),
+                label="⬇️ Download simulation chart (PNG)",
+                data=png_bytes,
                 file_name=f"{ticker}_montecarlo_{date.today()}.png",
                 mime="image/png",
                 use_container_width=True,
@@ -679,168 +703,244 @@ Keep the total response under 420 words. Do not use bullet points — write in f
 | Days simulated forward | {days} |
             """)
 
-    # ── Plot ──────────────────────────────────────────────────────────────────
+    # ── Interactive Plotly charts ─────────────────────────────────────────────
 
-    def build_figure(ticker, closes, params, paths, pcts, days, n_sims, info, start, end):
-        PANEL_BG = "#1a1a1a"
-        TEXT     = "#e0e0e0"
-        MUTED    = "#777777"
-        BLUE     = "#378ADD"
-        GREEN    = "#639922"
-        RED      = "#D85A30"
-        AMBER    = "#BA7517"
-        HIST_COL = "#1c3a5e"
-        FORE_COL = "#4caf78"
-
-        fig = plt.figure(figsize=(15, 14))
-        fig.patch.set_facecolor("#0f0f0f")
-
-        gs = gridspec.GridSpec(
-            3, 2, figure=fig,
-            height_ratios=[1.1, 1, 1.2],
-            hspace=0.52, wspace=0.32,
-        )
-        ax1 = fig.add_subplot(gs[0, :])
-        ax2 = fig.add_subplot(gs[1, 0])
-        ax3 = fig.add_subplot(gs[1, 1])
-        ax4 = fig.add_subplot(gs[2, :])
-
-        for ax in [ax1, ax2, ax3, ax4]:
-            ax.set_facecolor(PANEL_BG)
-            ax.tick_params(colors=MUTED, labelsize=9)
-            ax.tick_params(which="minor", colors=MUTED, labelsize=0)
-            for spine in ax.spines.values():
-                spine.set_edgecolor("#333333")
-
+    def build_fan_chart(ticker, closes, params, paths, pcts, days, n_sims, info, start, end):
+        """Panel 1 — simulation fan: all paths + percentile bands."""
         S0     = params["last_price"]
-        days_x = np.arange(days + 1)
+        days_x = list(range(days + 1))
         name   = info.get("longName", ticker.upper())
 
-        # Panel 1 — simulation fan
-        sample = min(n_sims, 120)
-        idx    = np.random.choice(n_sims, sample, replace=False)
+        fig = go.Figure()
+
+        # Ghost paths (random sample)
+        sample_n = min(n_sims, 80)
+        idx      = np.random.choice(n_sims, sample_n, replace=False)
         for i in idx:
-            ax1.plot(days_x, paths[i], color="#ffffff", alpha=0.04, linewidth=0.6)
-        ax1.fill_between(days_x, pcts["p5"],  pcts["p95"], color=BLUE, alpha=0.12, label="5-95th %ile band")
-        ax1.fill_between(days_x, pcts["p25"], pcts["p75"], color=BLUE, alpha=0.20, label="25-75th %ile band")
-        ax1.plot(days_x, pcts["p95"], color=GREEN, linewidth=1.2, linestyle="--", label="95th percentile")
-        ax1.plot(days_x, pcts["p50"], color=BLUE,  linewidth=2.0,                 label="Median")
-        ax1.plot(days_x, pcts["p5"],  color=RED,   linewidth=1.2, linestyle="--", label="5th percentile")
-        ax1.axhline(S0, color=AMBER, linewidth=1.0, linestyle=":", label=f"Starting price  ${S0:.2f}")
-        apply_grid(ax1)
-        ax1.set_title(
-            f"{name} ({ticker.upper()}) — {n_sims:,} paths, {days} trading days forward\n"
-            f"Historical window: {start}  →  {end}  ({params['num_hist_days']} trading days)  |  "
-            f"EWMA vol: {params['ann_vol_ewma']:.1%}  |  "
-            f"Recent drift: {params['ann_drift_recent']:+.1%}",
-            color=TEXT, fontsize=10, pad=10,
-        )
-        ax1.set_xlabel("Trading days forward", color=MUTED, fontsize=9)
-        ax1.set_ylabel("Simulated price (USD)", color=MUTED, fontsize=9)
-        ax1.legend(loc="upper left", fontsize=8, framealpha=0.3,
-                   labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
+            fig.add_trace(go.Scatter(
+                x=days_x, y=paths[i],
+                mode="lines",
+                line=dict(color="rgba(255,255,255,0.04)", width=0.8),
+                hoverinfo="skip",
+                showlegend=False,
+            ))
 
-        # Panel 2 — final price histogram
+        # 5–95 band
+        fig.add_trace(go.Scatter(
+            x=days_x + days_x[::-1],
+            y=list(pcts["p95"]) + list(pcts["p5"][::-1]),
+            fill="toself",
+            fillcolor="rgba(55,138,221,0.12)",
+            line=dict(color="rgba(0,0,0,0)"),
+            name="5–95th %ile band",
+            hoverinfo="skip",
+        ))
+
+        # 25–75 band
+        fig.add_trace(go.Scatter(
+            x=days_x + days_x[::-1],
+            y=list(pcts["p75"]) + list(pcts["p25"][::-1]),
+            fill="toself",
+            fillcolor="rgba(55,138,221,0.22)",
+            line=dict(color="rgba(0,0,0,0)"),
+            name="25–75th %ile band",
+            hoverinfo="skip",
+        ))
+
+        # Percentile lines
+        fig.add_trace(go.Scatter(
+            x=days_x, y=pcts["p95"],
+            mode="lines", line=dict(color=THEME["green"], width=1.5, dash="dash"),
+            name="95th percentile",
+            hovertemplate="Day %{x}<br>95th: $%{y:.2f}<extra></extra>",
+        ))
+        fig.add_trace(go.Scatter(
+            x=days_x, y=pcts["p50"],
+            mode="lines", line=dict(color=THEME["blue"], width=2.5),
+            name="Median",
+            hovertemplate="Day %{x}<br>Median: $%{y:.2f}<extra></extra>",
+        ))
+        fig.add_trace(go.Scatter(
+            x=days_x, y=pcts["p5"],
+            mode="lines", line=dict(color=THEME["red"], width=1.5, dash="dash"),
+            name="5th percentile",
+            hovertemplate="Day %{x}<br>5th: $%{y:.2f}<extra></extra>",
+        ))
+
+        # Starting price line
+        fig.add_hline(
+            y=S0,
+            line=dict(color=THEME["amber"], width=1.2, dash="dot"),
+            annotation_text=f"S0  ${S0:.2f}",
+            annotation_font_color=THEME["amber"],
+        )
+
+        fig.update_layout(
+            **base_layout(
+                title=f"{name} ({ticker}) — {n_sims:,} simulations · {days} trading days forward  |  "
+                      f"EWMA vol {params['ann_vol_ewma']:.1%}  ·  Recent drift {params['ann_drift_recent']:+.1%}",
+                xaxis=dict(title="Trading days forward"),
+                yaxis=dict(title="Simulated price (USD)"),
+                height=480,
+            ),
+            dragmode="zoom",
+        )
+        return fig
+
+    def build_forecast_chart(ticker, closes, params, paths, pcts, days, info, start, end):
+        """Panel 2 — history stitched to most-likely forecast with date x-axis."""
+        S0             = params["last_price"]
+        name           = info.get("longName", ticker.upper())
+        hist_dates     = [d.date() if hasattr(d, "date") else d for d in closes.index]
+        forecast_dates = add_trading_days(hist_dates[-1], days)
+        median_path    = find_median_path(paths, pcts)
+        end_price      = median_path[-1]
+        pct_change     = (end_price / S0 - 1) * 100
+
+        bridge_dates = [hist_dates[-1]] + forecast_dates
+        conf_low     = np.concatenate([[S0], pcts["p5"][1:]])
+        conf_high    = np.concatenate([[S0], pcts["p95"][1:]])
+
+        fig = go.Figure()
+
+        # 5–95 confidence band (forecast only)
+        fig.add_trace(go.Scatter(
+            x=bridge_dates + bridge_dates[::-1],
+            y=list(conf_high) + list(conf_low[::-1]),
+            fill="toself",
+            fillcolor="rgba(76,175,120,0.12)",
+            line=dict(color="rgba(0,0,0,0)"),
+            name="5–95th %ile band",
+            hoverinfo="skip",
+        ))
+
+        # Historical price
+        fig.add_trace(go.Scatter(
+            x=hist_dates, y=closes.values,
+            mode="lines",
+            line=dict(color=THEME["hist_col"], width=2),
+            name="History",
+            hovertemplate="%{x}<br>Close: $%{y:.2f}<extra></extra>",
+        ))
+
+        # Most-likely forecast
+        fig.add_trace(go.Scatter(
+            x=bridge_dates, y=median_path,
+            mode="lines",
+            line=dict(color=THEME["fore_col"], width=2),
+            name=f"Most-likely forecast ({days}d)",
+            hovertemplate="%{x}<br>Forecast: $%{y:.2f}<extra></extra>",
+        ))
+
+        # Vertical divider at forecast start
+        fig.add_vline(
+            x=str(hist_dates[-1]),
+            line=dict(color=THEME["muted"], width=1.2, dash="dash"),
+            annotation_text="Forecast start",
+            annotation_font_color=THEME["muted"],
+        )
+
+        # Annotation at forecast end
+        fig.add_annotation(
+            x=str(forecast_dates[-1]), y=end_price,
+            text=f"${end_price:.2f} ({pct_change:+.1f}%)",
+            showarrow=True, arrowhead=2,
+            arrowcolor=THEME["fore_col"],
+            font=dict(color=THEME["fore_col"], size=11, family="monospace"),
+            bgcolor=THEME["panel"], bordercolor=THEME["fore_col"],
+        )
+
+        fig.update_layout(
+            **base_layout(
+                title=f"{name} ({ticker}) — History & Most-Likely Forecast  |  "
+                      f"{hist_dates[0]} → {forecast_dates[-1]}",
+                xaxis=dict(title="Date", type="date"),
+                yaxis=dict(title="Price (USD)"),
+                height=480,
+            ),
+            dragmode="zoom",
+        )
+        return fig
+
+    def build_histogram_chart(ticker, paths, pcts, S0, days):
+        """Panel 3 — final price distribution histogram."""
         final = paths[:, -1]
-        ax2.hist(final, bins=50, color=BLUE, alpha=0.7, edgecolor=PANEL_BG, linewidth=0.3)
-        ax2.axvline(np.percentile(final,  5), color=RED,   linestyle="--", linewidth=1.2, label="5th %ile")
-        ax2.axvline(np.percentile(final, 50), color=BLUE,  linestyle="-",  linewidth=1.8, label="Median")
-        ax2.axvline(np.percentile(final, 95), color=GREEN, linestyle="--", linewidth=1.2, label="95th %ile")
-        ax2.axvline(S0, color=AMBER, linestyle=":", linewidth=1.2, label="Starting price")
-        apply_grid(ax2)
-        ax2.set_title(f"Final price distribution (day {days})", color=TEXT, fontsize=10, pad=8)
-        ax2.set_xlabel("Price (USD)", color=MUTED, fontsize=9)
-        ax2.set_ylabel("Number of simulations", color=MUTED, fontsize=9)
-        ax2.legend(fontsize=8, framealpha=0.3, labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
+        p5    = np.percentile(final,  5)
+        p50   = np.percentile(final, 50)
+        p95   = np.percentile(final, 95)
 
-        # Panel 3 — historical log-returns distribution
+        fig = go.Figure()
+
+        fig.add_trace(go.Histogram(
+            x=final, nbinsx=60,
+            marker=dict(color=THEME["blue"], opacity=0.75,
+                        line=dict(color=THEME["panel"], width=0.3)),
+            name="Simulated final prices",
+            hovertemplate="Price: $%{x:.2f}<br>Count: %{y}<extra></extra>",
+        ))
+
+        for val, label, colour in [
+            (p5,  "5th %ile",  THEME["red"]),
+            (p50, "Median",    THEME["blue"]),
+            (p95, "95th %ile", THEME["green"]),
+            (S0,  "S0",        THEME["amber"]),
+        ]:
+            fig.add_vline(
+                x=val,
+                line=dict(color=colour, width=1.8,
+                          dash="dash" if val != p50 else "solid"),
+                annotation_text=f"{label} ${val:.2f}",
+                annotation_font_color=colour,
+                annotation_font_size=10,
+            )
+
+        fig.update_layout(
+            **base_layout(
+                title=f"Final price distribution — day {days}",
+                xaxis=dict(title="Price (USD)", tickprefix="$"),
+                yaxis=dict(title="Number of simulations", tickprefix=""),
+                height=400,
+            )
+        )
+        return fig
+
+    def build_returns_chart(ticker, params, start, end):
+        """Panel 4 — historical log-returns distribution."""
         rets   = params["log_returns"] * 100
-        mean_r = rets.mean()
-        std_r  = rets.std()
-        ax3.hist(rets, bins=50, color=AMBER, alpha=0.7, edgecolor=PANEL_BG, linewidth=0.3)
-        ax3.axvline(0,              color=MUTED, linewidth=0.8, linestyle="--")
-        ax3.axvline(mean_r,         color=GREEN, linewidth=1.2, linestyle="--", label=f"Mean {mean_r:+.2f}%")
-        ax3.axvline(mean_r - std_r, color=RED,   linewidth=1.0, linestyle=":",  label=f"±1 sigma  {std_r:.2f}%")
-        ax3.axvline(mean_r + std_r, color=RED,   linewidth=1.0, linestyle=":")
-        apply_grid(ax3)
-        ax3.set_title(f"Historical daily log-returns\n{start}  →  {end}", color=TEXT, fontsize=10, pad=8)
-        ax3.set_xlabel("Daily return (%)", color=MUTED, fontsize=9)
-        ax3.set_ylabel("Frequency", color=MUTED, fontsize=9)
-        ax3.legend(fontsize=8, framealpha=0.3, labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
+        mean_r = float(rets.mean())
+        std_r  = float(rets.std())
 
-        # Panel 4 — history + most-likely forecast
-        hist_dates         = [(d.date() if hasattr(d, "date") else d) for d in closes.index]
-        forecast_dates     = add_trading_days(hist_dates[-1], days)
-        median_path        = find_median_path(paths, pcts)
-        forecast_end_price = median_path[-1]
-        pct_change         = (forecast_end_price / S0 - 1) * 100
+        fig = go.Figure()
 
-        def to_mpl(d):
-            if isinstance(d, datetime):
-                return mdates.date2num(d)
-            return mdates.date2num(datetime(d.year, d.month, d.day))
+        fig.add_trace(go.Histogram(
+            x=rets, nbinsx=60,
+            marker=dict(color=THEME["amber"], opacity=0.75,
+                        line=dict(color=THEME["panel"], width=0.3)),
+            name="Daily log-returns",
+            hovertemplate="Return: %{x:.2f}%<br>Count: %{y}<extra></extra>",
+        ))
 
-        hist_x     = [to_mpl(d) for d in hist_dates]
-        forecast_x = [to_mpl(d) for d in forecast_dates]
-        bridge_x   = [hist_x[-1]] + forecast_x
-        bridge_y   = median_path
-        conf_low   = np.concatenate([[S0], pcts["p5"][1:]])
-        conf_high  = np.concatenate([[S0], pcts["p95"][1:]])
+        for val, label, colour in [
+            (0,              "Zero",    THEME["muted"]),
+            (mean_r,         f"Mean {mean_r:+.2f}%",  THEME["green"]),
+            (mean_r - std_r, f"−1σ {mean_r-std_r:.2f}%", THEME["red"]),
+            (mean_r + std_r, f"+1σ {mean_r+std_r:.2f}%", THEME["red"]),
+        ]:
+            fig.add_vline(
+                x=val,
+                line=dict(color=colour, width=1.4, dash="dash"),
+                annotation_text=label,
+                annotation_font_color=colour,
+                annotation_font_size=10,
+            )
 
-        ax4.plot(hist_x, closes.values, color=HIST_COL, linewidth=1.8, label="History", zorder=3)
-        ax4.plot(bridge_x, bridge_y, color=FORE_COL, linewidth=1.8,
-                 label=f"Most-likely forecast ({days}d)", zorder=3)
-        ax4.fill_between(bridge_x, conf_low, conf_high,
-                         color=FORE_COL, alpha=0.12, label="5-95th %ile band")
-        divider_x = hist_x[-1]
-        ax4.axvline(divider_x, color=MUTED, linewidth=1.0, linestyle="--", zorder=4)
-        ax4.xaxis_date()
-        ax4.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
-        ax4.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
-        for label in ax4.get_xticklabels():
-            label.set_rotation(30)
-            label.set_ha("right")
-        apply_grid(ax4, date_axis=True)
-
-        all_y = list(closes.values) + list(median_path) + list(conf_low) + list(conf_high)
-        y_min = min(all_y) * 0.97
-        y_max = max(all_y) * 1.03
-        ax4.set_ylim(y_min, y_max)
-
-        ax4.text(
-            divider_x + (forecast_x[-1] - hist_x[-1]) * 0.01,
-            y_max * 0.98, "  Forecast start",
-            color=MUTED, fontsize=8, va="top", zorder=5,
-        )
-        ax4.annotate(
-            f"  ${S0:.2f}",
-            xy=(hist_x[-1], S0), xytext=(6, 0), textcoords="offset points",
-            color=TEXT, fontsize=8, va="center", zorder=5,
-        )
-        ax4.annotate(
-            f"${forecast_end_price:.2f}  ({pct_change:+.1f}%)",
-            xy=(forecast_x[-1], forecast_end_price),
-            xytext=(-88, 10), textcoords="offset points",
-            color=FORE_COL, fontsize=8, fontweight="bold", zorder=5,
-            arrowprops=dict(arrowstyle="-", color=FORE_COL, lw=0.8),
-        )
-        ax4.set_title(
-            f"{name} ({ticker.upper()}) — History & Most-Likely Forecast\n"
-            f"History: {hist_dates[0]} → {hist_dates[-1]}  |  "
-            f"Forecast: {forecast_dates[0]} → {forecast_dates[-1]}  ({days} trading days)",
-            color=TEXT, fontsize=10, pad=10,
-        )
-        ax4.set_xlabel("Date", color=MUTED, fontsize=9)
-        ax4.set_ylabel("Price (USD)", color=MUTED, fontsize=9)
-        ax4.legend(loc="upper left", fontsize=8, framealpha=0.3,
-                   labelcolor=TEXT, facecolor=PANEL_BG, edgecolor="#444")
-
-        plt.suptitle(
-            f"Monte Carlo Simulation — {ticker.upper()}  |  "
-            f"EWMA vol: {params['ann_vol_scaled']:.1%} ann.  |  "
-            f"Recent drift: {params['ann_drift_recent']:+.1%} ann.  |  "
-            f"Data: {start} → {end}",
-            color=TEXT, fontsize=11, y=0.99,
+        fig.update_layout(
+            **base_layout(
+                title=f"Historical daily log-returns  |  {start} → {end}",
+                xaxis=dict(title="Daily return (%)", ticksuffix="%", tickprefix=""),
+                yaxis=dict(title="Frequency", tickprefix=""),
+                height=400,
+            )
         )
         return fig
 
@@ -883,19 +983,36 @@ Keep the total response under 420 words. Do not use bullet points — write in f
 
                 st.divider()
                 st.subheader("📉 Charts")
-                fig = build_figure(
+
+                # ── Chart 1: Simulation fan
+                fig_fan = build_fan_chart(
                     ticker, closes, params, paths, pcts,
-                    days_forward, num_simulations, info,
-                    start_date, end_date,
+                    days_forward, num_simulations, info, start_date, end_date,
                 )
-                st.pyplot(fig, use_container_width=True)
+                st.plotly_chart(fig_fan, use_container_width=True)
+
+                # ── Chart 2: History + forecast (date axis)
+                fig_forecast = build_forecast_chart(
+                    ticker, closes, params, paths, pcts,
+                    days_forward, info, start_date, end_date,
+                )
+                st.plotly_chart(fig_forecast, use_container_width=True)
+
+                # ── Charts 3 & 4: side by side
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    fig_hist = build_histogram_chart(ticker, paths, pcts, S0, days_forward)
+                    st.plotly_chart(fig_hist, use_container_width=True)
+                with col_r:
+                    fig_rets = build_returns_chart(ticker, params, start_date, end_date)
+                    st.plotly_chart(fig_rets, use_container_width=True)
 
                 st.divider()
                 show_downloads(
-                    fig, paths, pcts, S0, ticker, days_forward,
+                    {"fan": fig_fan},
+                    paths, pcts, S0, ticker, days_forward,
                     start_date, end_date, params, ewma_lambda, t_dof, preset_name,
                 )
-                plt.close(fig)
 
             except ValueError as e:
                 st.error(str(e))
@@ -969,7 +1086,7 @@ path, VaR/CVaR risk metrics, and feeds everything to the AI summary engine.
 ---
 
 ## AI Summary
-After each simulation, results are sent to **Llama 3 70B** (via Groq) which generates
+After each simulation, results are sent to **Llama 3.3 70B** (via Groq) which generates
 a plain-English explanation tailored for retail investors — covering the forecast
 outlook, range of outcomes, risk picture, and model limitations.
 
@@ -1010,5 +1127,5 @@ CVaR is considered a more complete risk measure than VaR because it captures the
 
 ## Technology
 
-Built with **Python**, **Streamlit**, **yfinance**, **NumPy**, **SciPy**, **Matplotlib**, and **Groq (Llama 3 70B)**.
+Built with **Python**, **Streamlit**, **yfinance**, **NumPy**, **SciPy**, **Plotly**, and **Groq (Llama 3.3 70B)**.
     """)
