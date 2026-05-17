@@ -1132,7 +1132,7 @@ with tab_port:
     with pcol3:
         port_sims = st.slider(
             "Simulations",
-            min_value=100, max_value=5000, value=500, step=100,
+            min_value=100, max_value=10000, value=500, step=100,
         )
 
     pcol4, pcol5 = st.columns(2)
