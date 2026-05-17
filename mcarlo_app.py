@@ -973,17 +973,17 @@ Under 420 words. Flowing paragraphs, no bullet points. Reference numbers once th
             name="Simulated final prices",
             hovertemplate="Price: $%{x:.2f}<br>Count: %{y}<extra></extra>",
         ))
-        for val, label, color in [
+        for val, label, colour in [
             (p5,  "5th %ile",  THEME["red"]),
             (p50, "Median",    THEME["blue"]),
             (p95, "95th %ile", THEME["green"]),
             (S0,  "S0",        THEME["amber"]),
         ]:
             fig.add_vline(
-                x=val, line=dict(color=color, width=1.8,
+                x=val, line=dict(color=colour, width=1.8,
                                  dash="dash" if val != p50 else "solid"),
                 annotation_text=f"{label} ${val:.2f}",
-                annotation_font_color=color, annotation_font_size=10,
+                annotation_font_color=colour, annotation_font_size=10,
             )
         fig.update_layout(**base_layout(
             title=f"Final price distribution — day {days}",
@@ -1005,16 +1005,16 @@ Under 420 words. Flowing paragraphs, no bullet points. Reference numbers once th
             name="Daily log-returns",
             hovertemplate="Return: %{x:.2f}%<br>Count: %{y}<extra></extra>",
         ))
-        for val, label, color in [
+        for val, label, colour in [
             (0,              "Zero",                    THEME["muted"]),
             (mean_r,         f"Mean {mean_r:+.2f}%",   THEME["green"]),
             (mean_r - std_r, f"−1σ {mean_r-std_r:.2f}%", THEME["red"]),
             (mean_r + std_r, f"+1σ {mean_r+std_r:.2f}%", THEME["red"]),
         ]:
             fig.add_vline(
-                x=val, line=dict(color=color, width=1.4, dash="dash"),
+                x=val, line=dict(color=colour, width=1.4, dash="dash"),
                 annotation_text=label,
-                annotation_font_color=color, annotation_font_size=10,
+                annotation_font_color=colour, annotation_font_size=10,
             )
         fig.update_layout(**base_layout(
             title=f"Historical daily log-returns  |  {start} → {end}",
@@ -1256,6 +1256,7 @@ with tab_port:
                                 "paths":   paths_asset,
                                 "params":  ad["params"],
                                 "info":    ad["info"],
+                                "closes":  ad["closes"],
                                 "weight":  ad["weight"],
                                 "alloc":   alloc_value,
                                 "color":   PORTFOLIO_COLORS[len(asset_paths_all) % len(PORTFOLIO_COLORS)],
@@ -1332,14 +1333,14 @@ with tab_port:
                     ))
 
                     # Percentile lines
-                    for vals, label, color, dash in [
+                    for vals, label, colour, dash in [
                         (pcts_port["p95"], "95th percentile", THEME["green"], "dash"),
                         (pcts_port["p50"], "Median",          THEME["blue"],  "solid"),
                         (pcts_port["p5"],  "5th percentile",  THEME["red"],   "dash"),
                     ]:
                         fig_port.add_trace(go.Scatter(
                             x=days_x, y=vals, mode="lines",
-                            line=dict(color=color, width=2.0 if dash=="solid" else 1.5, dash=dash),
+                            line=dict(color=colour, width=2.0 if dash=="solid" else 1.5, dash=dash),
                             name=label,
                             hovertemplate=f"Day %{{x}}<br>{label}: $%{{y:,.2f}}<extra></extra>",
                         ))
@@ -1367,32 +1368,101 @@ with tab_port:
                     )
                     st.plotly_chart(fig_port, use_container_width=True)
 
-                    # ── Individual asset median paths overlay ─────────────────
+                    # ── Individual asset history + forecast + actual overlay ────
                     fig_assets = go.Figure()
+
                     for tk, ad in asset_paths_all.items():
-                        pcts_a = compute_percentiles(ad["paths"])
-                        # Normalise to % return for comparison
-                        S0_a   = ad["params"]["last_price"]
-                        median_ret = (pcts_a["p50"] / S0_a - 1) * 100
+                        pcts_a  = compute_percentiles(ad["paths"])
+                        S0_a    = ad["params"]["last_price"]
+                        colour  = ad["color"]
+                        closes_a= ad["closes"]
+
+                        # Historical dates and prices (normalised to % return)
+                        hist_dates_a  = [d.date() if hasattr(d, "date") else d
+                                         for d in closes_a.index]
+                        hist_ret_a    = (closes_a.values / closes_a.values[0] - 1) * 100
+
+                        # Forecast dates and median path (normalised to % return from S0)
+                        forecast_dates_a = add_trading_days(hist_dates_a[-1], port_days)
+                        bridge_dates_a   = [hist_dates_a[-1]] + forecast_dates_a
+                        median_path_a    = find_median_path(ad["paths"], pcts_a)
+                        median_ret_a     = (median_path_a / S0_a - 1) * 100
+
+                        # 5–95 band (normalised)
+                        conf_low_a  = np.concatenate([[0.0], (pcts_a["p5"][1:]  / S0_a - 1) * 100])
+                        conf_high_a = np.concatenate([[0.0], (pcts_a["p95"][1:] / S0_a - 1) * 100])
+                        band_xa = [str(d) for d in bridge_dates_a] + [str(d) for d in bridge_dates_a[::-1]]
+                        band_ya = list(conf_high_a) + list(conf_low_a[::-1])
                         fig_assets.add_trace(go.Scatter(
-                            x=days_x, y=median_ret, mode="lines",
-                            line=dict(color=ad["color"], width=2),
-                            name=f"{tk} ({ad['weight']*100:.0f}%)",
-                            hovertemplate=f"Day %{{x}}<br>{tk} median: %{{y:+.1f}}%<extra></extra>",
+                            x=band_xa, y=band_ya,
+                            fill="toself",
+                            fillcolor=f"rgba({int(colour[1:3],16)},{int(colour[3:5],16)},{int(colour[5:7],16)},0.08)",
+                            line=dict(color="rgba(0,0,0,0)"),
+                            showlegend=False, hoverinfo="skip",
                         ))
 
+                        # Historical price line
+                        fig_assets.add_trace(go.Scatter(
+                            x=[str(d) for d in hist_dates_a],
+                            y=hist_ret_a,
+                            mode="lines",
+                            line=dict(color=colour, width=2),
+                            name=f"{tk} ({ad['weight']*100:.0f}%) — History",
+                            hovertemplate=f"%{{x}}<br>{tk} history: %{{y:+.1f}}%<extra></extra>",
+                        ))
+
+                        # Forecast median line
+                        fig_assets.add_trace(go.Scatter(
+                            x=[str(d) for d in bridge_dates_a],
+                            y=median_ret_a,
+                            mode="lines",
+                            line=dict(color=colour, width=1.8, dash="dash"),
+                            name=f"{tk} — Forecast",
+                            hovertemplate=f"%{{x}}<br>{tk} forecast: %{{y:+.1f}}%<extra></extra>",
+                            showlegend=True,
+                        ))
+
+                        # Actual post-simulation price (dashed, fetched live)
+                        actual_a = fetch_actual_data(tk, port_end)
+                        if actual_a is not None and len(actual_a) > 1:
+                            actual_dates_a = [d.date() if hasattr(d, "date") else d
+                                              for d in actual_a.index]
+                            # Normalise actual vs S0 (same base as forecast)
+                            actual_ret_a = (actual_a.values / S0_a - 1) * 100
+                            fig_assets.add_trace(go.Scatter(
+                                x=[str(d) for d in actual_dates_a],
+                                y=actual_ret_a,
+                                mode="lines",
+                                line=dict(color=colour, width=2, dash="dot"),
+                                name=f"{tk} — Actual (post-simulation)",
+                                hovertemplate=f"%{{x}}<br>{tk} actual: %{{y:+.1f}}%<extra></extra>",
+                            ))
+
+                    # Vertical divider at forecast start (= port_end)
+                    fig_assets.add_shape(
+                        type="line",
+                        x0=str(port_end), x1=str(port_end),
+                        y0=0, y1=1, xref="x", yref="paper",
+                        line=dict(color=THEME["muted"], width=1.2, dash="dash"),
+                    )
+                    fig_assets.add_annotation(
+                        x=str(port_end), y=1, xref="x", yref="paper",
+                        text="Forecast start", showarrow=False,
+                        font=dict(color=THEME["muted"], size=10), yanchor="bottom",
+                    )
                     fig_assets.add_hline(
                         y=0, line=dict(color=THEME["muted"], width=1, dash="dot"),
                     )
                     fig_assets.update_layout(
                         **base_layout(
-                            title="Individual asset median return paths (% vs starting price)",
-                            xaxis=dict(title="Trading days forward"),
-                            yaxis=dict(title="Return (%)", ticksuffix="%"),
-                            height=420,
+                            title="Individual asset — History · Forecast (dashed) · Actual (dotted)",
+                            xaxis=dict(title="Date", type="date"),
+                            yaxis=dict(title="Return vs starting price (%)", ticksuffix="%"),
+                            height=480,
                         ),
                         dragmode="zoom",
                     )
+                    fig_assets.update_layout(hovermode="x")
                     st.plotly_chart(fig_assets, use_container_width=True)
 
                     # ── Portfolio final value distribution ────────────────────
@@ -1404,7 +1474,7 @@ with tab_port:
                         name="Portfolio final values",
                         hovertemplate="Value: $%{x:,.2f}<br>Count: %{y}<extra></extra>",
                     ))
-                    for val, label, color in [
+                    for val, label, colour in [
                         (p5_p,       "5th %ile",  THEME["red"]),
                         (p50_p,      "Median",    THEME["blue"]),
                         (p95_p,      "95th %ile", THEME["green"]),
@@ -1412,10 +1482,10 @@ with tab_port:
                     ]:
                         fig_phist.add_vline(
                             x=val,
-                            line=dict(color=color, width=1.8,
+                            line=dict(colour=colour, width=1.8,
                                       dash="dash" if val != p50_p else "solid"),
                             annotation_text=f"{label} ${val:,.0f}",
-                            annotation_font_color=color,
+                            annotation_font_color=colour,
                         )
                     fig_phist.update_layout(**base_layout(
                         title=f"Portfolio final value distribution — day {port_days}",
