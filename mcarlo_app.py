@@ -973,17 +973,17 @@ Under 420 words. Flowing paragraphs, no bullet points. Reference numbers once th
             name="Simulated final prices",
             hovertemplate="Price: $%{x:.2f}<br>Count: %{y}<extra></extra>",
         ))
-        for val, label, colour in [
+        for val, label, color in [
             (p5,  "5th %ile",  THEME["red"]),
             (p50, "Median",    THEME["blue"]),
             (p95, "95th %ile", THEME["green"]),
             (S0,  "S0",        THEME["amber"]),
         ]:
             fig.add_vline(
-                x=val, line=dict(color=colour, width=1.8,
+                x=val, line=dict(color=color, width=1.8,
                                  dash="dash" if val != p50 else "solid"),
                 annotation_text=f"{label} ${val:.2f}",
-                annotation_font_color=colour, annotation_font_size=10,
+                annotation_font_color=color, annotation_font_size=10,
             )
         fig.update_layout(**base_layout(
             title=f"Final price distribution — day {days}",
@@ -1005,16 +1005,16 @@ Under 420 words. Flowing paragraphs, no bullet points. Reference numbers once th
             name="Daily log-returns",
             hovertemplate="Return: %{x:.2f}%<br>Count: %{y}<extra></extra>",
         ))
-        for val, label, colour in [
+        for val, label, color in [
             (0,              "Zero",                    THEME["muted"]),
             (mean_r,         f"Mean {mean_r:+.2f}%",   THEME["green"]),
             (mean_r - std_r, f"−1σ {mean_r-std_r:.2f}%", THEME["red"]),
             (mean_r + std_r, f"+1σ {mean_r+std_r:.2f}%", THEME["red"]),
         ]:
             fig.add_vline(
-                x=val, line=dict(color=colour, width=1.4, dash="dash"),
+                x=val, line=dict(color=color, width=1.4, dash="dash"),
                 annotation_text=label,
-                annotation_font_color=colour, annotation_font_size=10,
+                annotation_font_color=color, annotation_font_size=10,
             )
         fig.update_layout(**base_layout(
             title=f"Historical daily log-returns  |  {start} → {end}",
@@ -1333,14 +1333,14 @@ with tab_port:
                     ))
 
                     # Percentile lines
-                    for vals, label, colour, dash in [
+                    for vals, label, color, dash in [
                         (pcts_port["p95"], "95th percentile", THEME["green"], "dash"),
                         (pcts_port["p50"], "Median",          THEME["blue"],  "solid"),
                         (pcts_port["p5"],  "5th percentile",  THEME["red"],   "dash"),
                     ]:
                         fig_port.add_trace(go.Scatter(
                             x=days_x, y=vals, mode="lines",
-                            line=dict(color=colour, width=2.0 if dash=="solid" else 1.5, dash=dash),
+                            line=dict(color=color, width=2.0 if dash=="solid" else 1.5, dash=dash),
                             name=label,
                             hovertemplate=f"Day %{{x}}<br>{label}: $%{{y:,.2f}}<extra></extra>",
                         ))
@@ -1374,7 +1374,7 @@ with tab_port:
                     for tk, ad in asset_paths_all.items():
                         pcts_a  = compute_percentiles(ad["paths"])
                         S0_a    = ad["params"]["last_price"]
-                        colour  = ad["color"]
+                        color  = ad["color"]
                         closes_a= ad["closes"]
 
                         # Historical dates and prices (normalised to % return)
@@ -1396,7 +1396,7 @@ with tab_port:
                         fig_assets.add_trace(go.Scatter(
                             x=band_xa, y=band_ya,
                             fill="toself",
-                            fillcolor=f"rgba({int(colour[1:3],16)},{int(colour[3:5],16)},{int(colour[5:7],16)},0.08)",
+                            fillcolor=f"rgba({int(color[1:3],16)},{int(color[3:5],16)},{int(color[5:7],16)},0.08)",
                             line=dict(color="rgba(0,0,0,0)"),
                             showlegend=False, hoverinfo="skip",
                         ))
@@ -1406,7 +1406,7 @@ with tab_port:
                             x=[str(d) for d in hist_dates_a],
                             y=hist_ret_a,
                             mode="lines",
-                            line=dict(color=colour, width=2),
+                            line=dict(color=color, width=2),
                             name=f"{tk} ({ad['weight']*100:.0f}%) — History",
                             hovertemplate=f"%{{x}}<br>{tk} history: %{{y:+.1f}}%<extra></extra>",
                         ))
@@ -1416,7 +1416,7 @@ with tab_port:
                             x=[str(d) for d in bridge_dates_a],
                             y=median_ret_a,
                             mode="lines",
-                            line=dict(color=colour, width=1.8, dash="dash"),
+                            line=dict(color=color, width=1.8, dash="dash"),
                             name=f"{tk} — Forecast",
                             hovertemplate=f"%{{x}}<br>{tk} forecast: %{{y:+.1f}}%<extra></extra>",
                             showlegend=True,
@@ -1433,7 +1433,7 @@ with tab_port:
                                 x=[str(d) for d in actual_dates_a],
                                 y=actual_ret_a,
                                 mode="lines",
-                                line=dict(color=colour, width=2, dash="dot"),
+                                line=dict(color=color, width=2, dash="dot"),
                                 name=f"{tk} — Actual (post-simulation)",
                                 hovertemplate=f"%{{x}}<br>{tk} actual: %{{y:+.1f}}%<extra></extra>",
                             ))
@@ -1474,7 +1474,7 @@ with tab_port:
                         name="Portfolio final values",
                         hovertemplate="Value: $%{x:,.2f}<br>Count: %{y}<extra></extra>",
                     ))
-                    for val, label, colour in [
+                    for val, label, color in [
                         (p5_p,       "5th %ile",  THEME["red"]),
                         (p50_p,      "Median",    THEME["blue"]),
                         (p95_p,      "95th %ile", THEME["green"]),
@@ -1482,10 +1482,10 @@ with tab_port:
                     ]:
                         fig_phist.add_vline(
                             x=val,
-                            line=dict(colour=colour, width=1.8,
+                            line=dict(color=color, width=1.8,
                                       dash="dash" if val != p50_p else "solid"),
                             annotation_text=f"{label} ${val:,.0f}",
-                            annotation_font_color=colour,
+                            annotation_font_color=color,
                         )
                     fig_phist.update_layout(**base_layout(
                         title=f"Portfolio final value distribution — day {port_days}",
